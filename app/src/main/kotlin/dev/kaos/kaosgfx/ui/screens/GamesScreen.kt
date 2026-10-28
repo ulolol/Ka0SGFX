@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,8 +44,8 @@ fun GamesScreen(
     onSelectGame: (GameApp) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var searchQuery by remember { mutableStateOf("") }
-    var showAllApps by remember { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var showAllApps by rememberSaveable { mutableStateOf(false) }
 
     val filteredGames = remember(games, searchQuery) {
         if (searchQuery.isBlank()) games

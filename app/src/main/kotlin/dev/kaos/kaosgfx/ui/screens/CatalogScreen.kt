@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -37,7 +38,7 @@ fun CatalogScreen(
     onImportZip: (Uri) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var selectedSourceId by remember { mutableStateOf<String?>("all") }
+    var selectedSourceId by rememberSaveable { mutableStateOf<String?>("all") }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()

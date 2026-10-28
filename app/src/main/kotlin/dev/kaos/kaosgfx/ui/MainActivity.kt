@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.lifecycleScope
@@ -80,7 +81,7 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun MainContent() {
-        var currentScreen by remember { mutableStateOf(Screen.GAMES) }
+        var currentScreen by rememberSaveable { mutableStateOf(Screen.GAMES) }
 
         val shizukuState by app.privilegedClient.shizukuState.collectAsState()
 
@@ -91,7 +92,10 @@ class MainActivity : ComponentActivity() {
         var isCatalogLoading by remember { mutableStateOf(false) }
         val downloadingMap = remember { mutableStateMapOf<String, Int>() }
 
-        var selectedGame by remember { mutableStateOf<GameApp?>(null) }
+        var selectedGamePackage by rememberSaveable { mutableStateOf<String?>(null) }
+        val selectedGame = remember(games, selectedGamePackage) {
+            selectedGamePackage?.let { pkg -> games.find { it.packageName == pkg } }
+        }
         var patchProgressStep by remember { mutableStateOf<String?>(null) }
         var patchProgressPercent by remember { mutableFloatStateOf(0f) }
 
@@ -115,7 +119,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        var includeSystemApps by remember { mutableStateOf(false) }
+        var includeSystemApps by rememberSaveable { mutableStateOf(false) }
 
         fun loadGames(includeSystem: Boolean = includeSystemApps) {
             lifecycleScope.launch {
@@ -186,7 +190,7 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onRequestStorage = { requestStoragePermission() },
-                        onSelectGame = { selectedGame = it }
+                        onSelectGame = { selectedGamePackage = it.packageName }
                     )
 
                     Screen.CATALOG -> CatalogScreen(
@@ -239,9 +243,9 @@ class MainActivity : ComponentActivity() {
                         game = game,
                         availableDrivers = catalogDrivers,
                         privilegedClient = app.privilegedClient,
-                        onDismiss = { selectedGame = null },
+                        onDismiss = { selectedGamePackage = null },
                         onPatchGame = { targetGame, driver, enableAngle ->
-                            selectedGame = null
+                            selectedGamePackage = null
                             lifecycleScope.launch {
                                 patchProgressStep = "Starting patch workflow..."
                                 patchProgressPercent = 0.05f
@@ -266,7 +270,7 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onUnpatchGame = { targetGame ->
-                            selectedGame = null
+                            selectedGamePackage = null
                             lifecycleScope.launch {
                                 patchProgressStep = "Restoring stock configuration..."
                                 patchProgressPercent = 0.1f

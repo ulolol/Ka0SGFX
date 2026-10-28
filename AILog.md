@@ -201,6 +201,17 @@ KaosGFX (`dev.kaos.kaosgfx`) is an open-source, non-root graphics driver manager
       5. Updated VKProbe's `MainActivity.kt` config reader and `PatchOrchestrator.kt` unpatcher to synchronize with `/data/local/tmp/kaosgfx/<packageName>/`.
       6. Recompiled `bootstrap.dex` and rebuilt `app-debug.apk` and `vkprobe-debug.apk`.
 
+  - **Issue**: Multi-split applications (e.g. 3DMark `com.futuremark.dmandroid.application` with 10 splits) failed installation with: `Failure [INSTALL_FAILED_INVALID_APK: ... signatures are inconsistent]`.
+    - *Root Cause*: `PatchOrchestrator.kt` patched and signed `base.apk` with the KaosGFX certificate (`kaosgfx_signing.p12`), but passed the raw installed split APKs (`split_config.*.apk`) unmodified. Android's PackageInstaller strictly enforces that all split APKs in an install session share identical signing certificates in their APK signature scheme blocks.
+    - *Fix Implemented*:
+      1. Updated `PatchOrchestrator.kt` to iterate over all split APKs in `game.splitApkPaths`, re-signing each split via `patcherEngine.reSignSplitApk()` using the matching KaosGFX credentials.
+      2. Added pristine backup and restoration of split APKs (`${packageName}-stock-splits/`) to ensure clean stock restoration.
+  - **Issue**: Screen rotation (portrait <-> landscape) caused the UI to recreate, dropping search filters and closing active game sheets.
+    - *Fix Implemented*:
+      1. Added `android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode"` to `MainActivity` in `AndroidManifest.xml` to prevent activity teardown on orientation change.
+      2. Switched search states (`searchQuery` in `GamesScreen`, `driverSearchQuery` in `GameDetailSheet`, `selectedSourceId` in `CatalogScreen`) and screen navigation states to `rememberSaveable`.
+      3. Tracked `selectedGamePackage` via `rememberSaveable` so open game detail sheets persist across orientation changes and recompositions.
+
 - [x] Phase 1: Native bridge, PLT/GOT hook engine, bootstrap DEX.
 - [x] Phase 2: APK patcher engine (manifest, DEX, libs, alignment, v1-v3 signing).
 - [x] Phase 3: Shizuku privileged service & AIDL IPC.

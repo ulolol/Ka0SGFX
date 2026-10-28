@@ -64,10 +64,21 @@ class PatchOrchestrator(
 
             // Back up pristine stock APK if not already backed up or if currently running unpatched stock
             val stockBackup = File(workDir, "${game.packageName}-stock.apk")
+            val stockSplitsDir = File(workDir, "${game.packageName}-stock-splits")
             if (!stockBackup.exists() || !game.isPatched) {
                 try {
                     baseApk.copyTo(stockBackup, overwrite = true)
                     Log.i(TAG, "Pristine stock APK backed up to ${stockBackup.absolutePath}")
+                    if (game.splitApkPaths.isNotEmpty()) {
+                        stockSplitsDir.mkdirs()
+                        game.splitApkPaths.forEach { sp ->
+                            val sf = File(sp)
+                            if (sf.exists()) {
+                                sf.copyTo(File(stockSplitsDir, sf.name), overwrite = true)
+                            }
+                        }
+                        Log.i(TAG, "Pristine stock splits backed up (${game.splitApkPaths.size} splits)")
+                    }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not back up stock APK: ${e.message}")
                 }
@@ -89,13 +100,29 @@ class PatchOrchestrator(
             patcherEngine.patchBaseApk(sourceApk, patchedApk)
             Log.i(TAG, "Patched APK successfully written to ${patchedApk.absolutePath}")
 
-            // Step 2: Install via Shizuku (with automatic data backup & signature mismatch handling)
+            // Step 2: Re-sign split APKs with matching KaosGFX credentials so pm install-commit accepts the session
+            val splitsToInstall = mutableListOf<File>()
+            if (game.splitApkPaths.isNotEmpty()) {
+                val signedSplitsDir = File(workDir, "${game.packageName}-signed-splits").apply { mkdirs() }
+                val totalSplits = game.splitApkPaths.size
+                game.splitApkPaths.forEachIndexed { idx, splitPath ->
+                    val origFile = File(splitPath)
+                    val pristineSplit = File(stockSplitsDir, origFile.name).takeIf { it.exists() && it.length() > 0 } ?: origFile
+                    val outSplit = File(signedSplitsDir, origFile.name)
+                    val progressFraction = 0.25f + 0.2f * ((idx + 1f) / totalSplits)
+                    onProgress("Re-signing split APK ${idx + 1}/$totalSplits (${origFile.name})...", progressFraction)
+                    patcherEngine.reSignSplitApk(pristineSplit, outSplit)
+                    splitsToInstall.add(outSplit)
+                }
+                Log.i(TAG, "Successfully re-signed ${splitsToInstall.size} split APKs with consistent key")
+            }
+
+            // Step 3: Install via Shizuku (with automatic data backup & signature mismatch handling)
             onProgress("Installing patched APK via privileged PackageInstaller...", 0.5f)
-            val splitFiles = game.splitApkPaths.map { File(it) }
             val installResult = privilegedClient.installApk(
                 game.packageName,
                 patchedApk,
-                splitFiles,
+                splitsToInstall,
                 allowReinstallOnSignatureMismatch = true
             )
             if (installResult.isFailure) {
@@ -180,12 +207,18 @@ class PatchOrchestrator(
                 apkToInstall = unpatchedApk
             }
 
+            val stockSplitsDir = File(workDir, "${game.packageName}-stock-splits")
+            val splitsToRestore = if (stockSplitsDir.exists()) {
+                stockSplitsDir.listFiles { _, name -> name.endsWith(".apk") }?.toList() ?: emptyList()
+            } else {
+                game.splitApkPaths.map { File(it) }.filter { it.exists() }
+            }
+
             onProgress?.invoke("Installing restored stock APK via privileged installer...", 0.55f)
-            val splitFiles = game.splitApkPaths.map { File(it) }
             val installResult = privilegedClient.installApk(
                 game.packageName,
                 apkToInstall,
-                splitFiles,
+                splitsToRestore,
                 allowReinstallOnSignatureMismatch = true
             )
             if (installResult.isFailure) {
@@ -194,11 +227,13 @@ class PatchOrchestrator(
                 )
             }
 
-            // Clean up staged driver files and patched artifact
+            // Clean up staged driver files, signed splits, and patched artifact
             onProgress?.invoke("Cleaning up custom driver bundles and routing...", 0.85f)
             try {
                 val patchedFile = File(workDir, "${game.packageName}-patched.apk")
                 if (patchedFile.exists()) patchedFile.delete()
+                val signedSplitsDir = File(workDir, "${game.packageName}-signed-splits")
+                if (signedSplitsDir.exists()) signedSplitsDir.deleteRecursively()
                 val stagedDriverDir = File("/sdcard/Android/data/${game.packageName}/files/kaosgfx")
                 if (stagedDriverDir.exists()) stagedDriverDir.deleteRecursively()
                 val tmpStagedDir = File("/data/local/tmp/kaosgfx/${game.packageName}")
