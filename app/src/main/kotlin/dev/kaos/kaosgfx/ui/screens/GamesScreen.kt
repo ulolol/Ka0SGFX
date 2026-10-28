@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.draw.scale
 import dev.kaos.kaosgfx.domain.GameApp
 import dev.kaos.kaosgfx.privileged.ShizukuState
 import dev.kaos.kaosgfx.ui.components.ShizukuBanner
@@ -34,6 +35,8 @@ fun GamesScreen(
     games: List<GameApp>,
     isLoading: Boolean,
     shizukuState: ShizukuState,
+    includeSystemApps: Boolean = false,
+    onToggleSystemApps: ((Boolean) -> Unit)? = null,
     onRefresh: () -> Unit,
     onRequestShizuku: () -> Unit,
     onRequestStorage: () -> Unit,
@@ -106,8 +109,42 @@ fun GamesScreen(
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 12.dp)
+                    .padding(bottom = 8.dp)
             )
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp)
+            ) {
+                Text(
+                    text = "${filteredGames.size} patchable apps",
+                    fontSize = 12.sp,
+                    color = TextSecondary,
+                    fontWeight = FontWeight.Medium
+                )
+                if (onToggleSystemApps != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "System Apps",
+                            fontSize = 12.sp,
+                            color = if (includeSystemApps) PrimaryNeon else TextSecondary
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Switch(
+                            checked = includeSystemApps,
+                            onCheckedChange = onToggleSystemApps,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = PrimaryNeon,
+                                checkedTrackColor = PrimaryBlue
+                            ),
+                            modifier = Modifier.scale(0.8f)
+                        )
+                    }
+                }
+            }
 
             if (isLoading) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

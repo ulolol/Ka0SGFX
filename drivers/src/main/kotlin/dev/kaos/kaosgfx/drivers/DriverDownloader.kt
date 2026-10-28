@@ -23,7 +23,7 @@ class DriverDownloader(private val context: Context) {
     }
 
     private val client = OkHttpClient()
-    private val storageDir = File(context.filesDir, "drivers").apply { mkdirs() }
+    private val storageDir get() = DriverStorage.getDriversDir(context)
     private val json = Json { ignoreUnknownKeys = true }
 
     fun downloadDriver(driver: DriverMetadata): Flow<DownloadProgress> = flow {

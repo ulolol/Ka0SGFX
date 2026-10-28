@@ -60,4 +60,56 @@ object ManifestPatcher {
         manifest.refreshFull()
         return PatchResult(manifest.bytes, existingFactory, wasAlreadyPatched = false)
     }
+
+    fun unpatchManifestBytes(inputBytes: ByteArray): ByteArray {
+        val manifest = AndroidManifestBlock()
+        manifest.readBytes(ByteArrayInputStream(inputBytes))
+
+        val appElement = manifest.applicationElement
+            ?: throw IllegalStateException("Manifest does not contain an <application> element")
+
+        // 1. Find if original factory was stored in meta-data
+        var originalFactory: String? = null
+        val elements = appElement.recursiveElements()
+        while (elements.hasNext()) {
+            val element = elements.next()
+            if (element.name == "meta-data") {
+                val nameAttr = element.searchAttributeByResourceId(ID_NAME)
+                    ?: element.searchAttributeByName(ATTR_NAME)
+                val valStr = nameAttr?.valueAsString ?: nameAttr?.valueString
+                if (valStr == META_ORIGINAL_FACTORY) {
+                    val valAttr = element.searchAttributeByResourceId(ID_VALUE)
+                        ?: element.searchAttributeByName(ATTR_VALUE)
+                    originalFactory = valAttr?.valueAsString ?: valAttr?.valueString
+                }
+            }
+        }
+
+        // Remove the meta-data element
+        appElement.removeElements { element ->
+            if (element.name == "meta-data") {
+                val nameAttr = element.searchAttributeByResourceId(ID_NAME)
+                    ?: element.searchAttributeByName(ATTR_NAME)
+                val valStr = nameAttr?.valueAsString ?: nameAttr?.valueString
+                valStr == META_ORIGINAL_FACTORY
+            } else {
+                false
+            }
+        }
+
+        // 2. Restore or remove appComponentFactory
+        val factoryAttr = appElement.searchAttributeByResourceId(ID_APP_COMPONENT_FACTORY)
+            ?: appElement.searchAttributeByName(ATTR_APP_COMPONENT_FACTORY)
+
+        if (factoryAttr != null) {
+            if (!originalFactory.isNullOrBlank()) {
+                factoryAttr.valueAsString = originalFactory
+            } else {
+                appElement.removeAttribute(factoryAttr)
+            }
+        }
+
+        manifest.refreshFull()
+        return manifest.bytes
+    }
 }

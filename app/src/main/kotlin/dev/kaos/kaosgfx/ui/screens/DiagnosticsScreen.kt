@@ -100,7 +100,7 @@ fun DiagnosticsScreen(
                     )
                     DiagRow("Installation Mode", "Direct In-Process Bootstrap (Blueprint 1)")
                     DiagRow("Hook Engine", "ELF PLT/GOT Relocation Engine")
-                    DiagRow("Driver Isolation", "External Data Staging (/sdcard/Android/data/)")
+                    DiagRow("Driver Isolation", "World-accessible Staging (/data/local/tmp/kaosgfx/)")
                 }
             }
 

@@ -58,7 +58,8 @@ class MainActivity : ComponentActivity() {
             this,
             app.patcherEngine,
             app.privilegedClient,
-            app.driverManager
+            app.driverManager,
+            app.driverDownloader
         )
     }
 
@@ -114,10 +115,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        fun loadGames() {
+        var includeSystemApps by remember { mutableStateOf(false) }
+
+        fun loadGames(includeSystem: Boolean = includeSystemApps) {
             lifecycleScope.launch {
                 isGamesLoading = true
-                games = scanner.scanGames(includeAllApps = false)
+                games = scanner.scanGames(includeAllApps = includeSystem)
                 isGamesLoading = false
             }
         }
@@ -171,7 +174,12 @@ class MainActivity : ComponentActivity() {
                         games = games,
                         isLoading = isGamesLoading,
                         shizukuState = shizukuState,
-                        onRefresh = { loadGames() },
+                        includeSystemApps = includeSystemApps,
+                        onToggleSystemApps = {
+                            includeSystemApps = it
+                            loadGames(it)
+                        },
+                        onRefresh = { loadGames(includeSystemApps) },
                         onRequestShizuku = {
                             lifecycleScope.launch {
                                 app.privilegedClient.requestPermission()
@@ -229,7 +237,8 @@ class MainActivity : ComponentActivity() {
                 selectedGame?.let { game ->
                     GameDetailSheet(
                         game = game,
-                        availableDrivers = catalogDrivers.filter { it.isInstalled },
+                        availableDrivers = catalogDrivers,
+                        privilegedClient = app.privilegedClient,
                         onDismiss = { selectedGame = null },
                         onPatchGame = { targetGame, driver, enableAngle ->
                             selectedGame = null
@@ -250,6 +259,7 @@ class MainActivity : ComponentActivity() {
                                 if (res.isSuccess) {
                                     Toast.makeText(this@MainActivity, "Successfully injected ${driver.name} into ${targetGame.appName}!", Toast.LENGTH_LONG).show()
                                     loadGames()
+                                    loadCatalog()
                                 } else {
                                     Toast.makeText(this@MainActivity, "Patch failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                                 }
@@ -258,12 +268,20 @@ class MainActivity : ComponentActivity() {
                         onUnpatchGame = { targetGame ->
                             selectedGame = null
                             lifecycleScope.launch {
-                                patchProgressStep = "Restoring stock settings..."
-                                patchProgressPercent = 0.5f
-                                orchestrator.unpatchGame(targetGame, null)
+                                patchProgressStep = "Restoring stock configuration..."
+                                patchProgressPercent = 0.1f
+                                val res = orchestrator.unpatchGame(targetGame) { step, progress ->
+                                    patchProgressStep = step
+                                    patchProgressPercent = progress
+                                }
                                 patchProgressStep = null
-                                Toast.makeText(this@MainActivity, "Restored stock configuration for ${targetGame.appName}", Toast.LENGTH_SHORT).show()
-                                loadGames()
+                                if (res.isSuccess) {
+                                    Toast.makeText(this@MainActivity, "Restored stock configuration for ${targetGame.appName}", Toast.LENGTH_SHORT).show()
+                                    loadGames()
+                                    loadCatalog()
+                                } else {
+                                    Toast.makeText(this@MainActivity, "Restore failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                                }
                             }
                         }
                     )

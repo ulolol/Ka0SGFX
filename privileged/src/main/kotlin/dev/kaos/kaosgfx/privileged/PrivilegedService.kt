@@ -225,26 +225,103 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun stageDriverBundle(packageName: String, driverZipPath: String?, configJson: String): Boolean {
         return try {
-            val targetDir = File("/sdcard/Android/data/$packageName/files/kaosgfx")
-            if (!targetDir.exists()) {
-                targetDir.mkdirs()
+            // Primary staging location: /data/local/tmp/kaosgfx/<packageName>
+            // World-readable by any app process without requiring storage permissions
+            val stagingDir = File("/data/local/tmp/kaosgfx/$packageName")
+            if (!stagingDir.exists()) {
+                stagingDir.mkdirs()
             }
 
-            val configFile = File(targetDir, "kaosgfx_driver_config.json")
+            val configFile = File(stagingDir, "kaosgfx_driver_config.json")
             configFile.writeText(configJson)
 
             if (!driverZipPath.isNullOrEmpty()) {
                 val srcZip = File(driverZipPath)
                 if (srcZip.exists()) {
-                    val destZip = File(targetDir, "driver.zip")
+                    val destZip = File(stagingDir, "driver.zip")
                     srcZip.copyTo(destZip, overwrite = true)
+                    Log.i(TAG, "Copied driver zip from $driverZipPath to ${destZip.absolutePath} (${destZip.length()} bytes)")
+                } else {
+                    Log.w(TAG, "Driver zip file does not exist or unreadable by UID 2000: $driverZipPath")
                 }
+            } else {
+                Log.i(TAG, "No driver zip path provided for $packageName; using config-only routing.")
             }
-            Log.i(TAG, "Successfully staged driver bundle for $packageName at ${targetDir.absolutePath}")
+
+            // Ensure world-readability across UID and sandbox boundaries
+            executeCommand(listOf("chmod", "777", "/data/local/tmp/kaosgfx"))
+            executeCommand(listOf("chmod", "-R", "777", stagingDir.absolutePath))
+
+            // Fallback staging location: /sdcard/Android/data/<packageName>/files/kaosgfx
+            try {
+                val fallbackDir = File("/sdcard/Android/data/$packageName/files/kaosgfx")
+                if (!fallbackDir.exists()) {
+                    fallbackDir.mkdirs()
+                }
+                File(fallbackDir, "kaosgfx_driver_config.json").writeText(configJson)
+                if (!driverZipPath.isNullOrEmpty() && File(driverZipPath).exists()) {
+                    File(driverZipPath).copyTo(File(fallbackDir, "driver.zip"), overwrite = true)
+                }
+                executeCommand(listOf("chmod", "-R", "777", fallbackDir.absolutePath))
+            } catch (ignored: Exception) {}
+
+            Log.i(TAG, "Successfully staged driver bundle for $packageName at ${stagingDir.absolutePath}")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stage driver bundle for $packageName", e)
             false
+        }
+    }
+
+    override fun getDriverConfig(packageName: String): String {
+        return try {
+            val primaryFile = File("/data/local/tmp/kaosgfx/$packageName/kaosgfx_driver_config.json")
+            if (primaryFile.exists() && primaryFile.canRead()) {
+                return primaryFile.readText()
+            }
+            val fallbackFile = File("/sdcard/Android/data/$packageName/files/kaosgfx/kaosgfx_driver_config.json")
+            if (fallbackFile.exists() && fallbackFile.canRead()) {
+                fallbackFile.readText()
+            } else ""
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed reading driver config for $packageName via privileged service: ${e.message}")
+            ""
+        }
+    }
+
+    override fun getPipelineLogs(packageName: String, maxLines: Int): String {
+        return try {
+            // Do NOT use -t with -s: on Android, -t takes the last N lines of the ENTIRE system buffer BEFORE filtering!
+            val cmd = listOf(
+                "logcat", "-d",
+                "-s", "KaosGFX-Bootstrap", "KaosGFX-Bridge", "KaosGFX-PLTHook", "Turnip", "freedreno", "vulkan", "Adreno"
+            )
+            val res = executeCommand(cmd)
+            val allLines = res.stdout.lines().filter { it.isNotBlank() }
+            val takeCount = if (maxLines in 10..500) maxLines else 150
+            if (allLines.isEmpty()) {
+                val pid = getPackageProcessId(packageName)
+                if (pid > 0) {
+                    val pidRes = executeCommand(listOf("logcat", "-d", "--pid", pid.toString()))
+                    pidRes.stdout.lines().takeLast(takeCount).joinToString("\n")
+                } else {
+                    "No pipeline logs found in logcat buffer."
+                }
+            } else {
+                allLines.takeLast(takeCount).joinToString("\n")
+            }
+        } catch (e: Exception) {
+            "Error retrieving logcat: ${e.message}"
+        }
+    }
+
+    override fun getPackageProcessId(packageName: String): Int {
+        return try {
+            val res = executeCommand(listOf("pidof", packageName))
+            val pidStr = res.stdout.trim().split("\\s+".toRegex()).firstOrNull()
+            pidStr?.toIntOrNull() ?: -1
+        } catch (e: Exception) {
+            -1
         }
     }
 

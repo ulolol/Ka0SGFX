@@ -34,7 +34,9 @@ data class DriverConfig(
     val driverDir: String,
     val driverName: String,
     val hookLibDir: String = "",
-    val enableAngle: Boolean = false
+    val enableAngle: Boolean = false,
+    val driverId: String = "",
+    val driverTitle: String = ""
 )
 
 sealed class DownloadProgress {

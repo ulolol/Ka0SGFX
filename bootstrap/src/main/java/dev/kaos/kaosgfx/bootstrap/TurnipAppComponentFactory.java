@@ -18,7 +18,6 @@ import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
 import java.util.Enumeration;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -30,6 +29,9 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
 
     private static AppComponentFactory sOriginalFactory = null;
     private static boolean sInitialized = false;
+    private static boolean sPipelineActive = false;
+    private static String sActiveDriverName = "Turnip Freedreno";
+    private static boolean sToastShown = false;
 
     public static native boolean nativeInit(
         String pkgDataDir,
@@ -74,14 +76,55 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
         }
 
         // 4. Resolve driver directory & filename from config or defaults
-        DriverConfig config = readDriverConfig(aInfo.dataDir);
+        DriverConfig config = readDriverConfig(aInfo);
         File driverDir = new File(config.driverDir);
+
+        // Check if external or internal staged driver.zip exists, and unpack it
+        unpackStagedDriverIfNeeded(aInfo, driverDir);
+
         File driverFile = new File(driverDir, config.driverName);
+        if (!driverFile.exists()) {
+            // Check meta.json in driverDir for true libraryName
+            File metaFile = new File(driverDir, "meta.json");
+            if (metaFile.exists()) {
+                String metaContent = readTextFile(metaFile);
+                String metaLib = extractJsonField(metaContent, "libraryName");
+                if (metaLib != null && !metaLib.isEmpty()) {
+                    File metaDriver = new File(driverDir, metaLib);
+                    if (metaDriver.exists()) {
+                        driverFile = metaDriver;
+                        config.driverName = metaLib;
+                        Log.i(TAG, "Resolved driver library from meta.json: " + metaLib);
+                    }
+                }
+            }
+        }
+
+        if (!driverFile.exists() && driverDir.exists()) {
+            // Autodetect any valid Vulkan library in driverDir
+            File[] soFiles = driverDir.listFiles((dir, name) -> name.endsWith(".so"));
+            if (soFiles != null && soFiles.length > 0) {
+                File chosen = null;
+                for (File f : soFiles) {
+                    String n = f.getName().toLowerCase();
+                    if (n.startsWith("vulkan") || n.contains("freedreno") || n.contains("adreno") || n.contains("turnip") || n.contains("gsl")) {
+                        chosen = f;
+                        break;
+                    }
+                }
+                if (chosen == null) chosen = soFiles[0];
+                driverFile = chosen;
+                config.driverName = chosen.getName();
+                Log.i(TAG, "Autodetected driver library from driverDir: " + config.driverName);
+            }
+        }
 
         if (!driverFile.exists()) {
             Log.w(TAG, "Custom driver not found at " + driverFile.getAbsolutePath() + ", skipping hook injection.");
             return;
         }
+
+        sActiveDriverName = config.driverName;
 
         // 5. Invoke native bridge
         try {
@@ -95,6 +138,7 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
             Log.i(TAG, "nativeInit completed, status = " + success);
 
             if (success) {
+                sPipelineActive = true;
                 // Clear crash guard after 5 seconds of healthy execution
                 new Thread(() -> {
                     try {
@@ -105,6 +149,63 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
             }
         } catch (Throwable t) {
             Log.e(TAG, "Exception during nativeInit: " + t.getMessage(), t);
+        }
+    }
+
+    private static void unpackStagedDriverIfNeeded(ApplicationInfo aInfo, File targetDir) {
+        File[] candidateZips = new File[]{
+            new File("/data/local/tmp/kaosgfx/" + aInfo.packageName + "/driver.zip"),
+            new File("/data/local/tmp/kaosgfx/driver.zip"),
+            new File("/sdcard/Android/data/" + aInfo.packageName + "/files/kaosgfx/driver.zip"),
+            new File(aInfo.dataDir, "files/kaosgfx/driver.zip"),
+            new File(aInfo.dataDir, "files/driver.zip")
+        };
+
+        for (File zipFile : candidateZips) {
+            Log.i(TAG, "Evaluating staged driver zip candidate: " + zipFile.getAbsolutePath() + " (exists=" + zipFile.exists() + ", canRead=" + zipFile.canRead() + ")");
+            if (zipFile.exists() && zipFile.canRead()) {
+                if (!targetDir.exists()) {
+                    targetDir.mkdirs();
+                }
+                File stampFile = new File(targetDir, ".unpacked_stamp");
+                if (stampFile.exists() && stampFile.lastModified() >= zipFile.lastModified()) {
+                    Log.i(TAG, "Driver in " + targetDir.getAbsolutePath() + " is already up-to-date with " + zipFile.getAbsolutePath());
+                    return; // Already up-to-date
+                }
+
+                Log.i(TAG, "Unpacking driver zip: " + zipFile.getAbsolutePath() + " into " + targetDir.getAbsolutePath());
+                try (ZipFile zip = new ZipFile(zipFile)) {
+                    Enumeration<? extends ZipEntry> entries = zip.entries();
+                    byte[] buf = new byte[8192];
+                    while (entries.hasMoreElements()) {
+                        ZipEntry entry = entries.nextElement();
+                        if (entry.isDirectory()) continue;
+                        String name = entry.getName();
+                        String simpleName = name.substring(name.lastIndexOf('/') + 1);
+
+                        // Extract both flat in targetDir and under relative path if any
+                        File outFile = new File(targetDir, simpleName);
+                        try (InputStream in = zip.getInputStream(entry);
+                             FileOutputStream out = new FileOutputStream(outFile)) {
+                            int r;
+                            while ((r = in.read(buf)) != -1) {
+                                out.write(buf, 0, r);
+                            }
+                        }
+                        outFile.setReadable(true, false);
+                        if (simpleName.endsWith(".so")) {
+                            outFile.setExecutable(true, false);
+                        }
+                    }
+                    try (FileOutputStream fos = new FileOutputStream(stampFile)) {
+                        fos.write("ok".getBytes());
+                    }
+                    Log.i(TAG, "Driver package unpacked successfully into " + targetDir.getAbsolutePath());
+                    return;
+                } catch (Throwable t) {
+                    Log.e(TAG, "Failed unpacking driver zip " + zipFile.getAbsolutePath() + ": " + t.getMessage(), t);
+                }
+            }
         }
     }
 
@@ -126,7 +227,6 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
     }
 
     private static String resolveHookLibDir(ApplicationInfo aInfo) {
-        // If nativeLibraryDir exists and contains libhook_impl.so, use it directly
         if (aInfo.nativeLibraryDir != null) {
             File directHook = new File(aInfo.nativeLibraryDir, "libhook_impl.so");
             if (directHook.exists()) {
@@ -134,7 +234,6 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
             }
         }
 
-        // Otherwise extract from APK into files/kaos_hook_libs
         File targetDir = new File(aInfo.dataDir, "files/kaos_hook_libs");
         if (!targetDir.exists()) {
             targetDir.mkdirs();
@@ -220,32 +319,63 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
         }
     }
 
-    private static DriverConfig readDriverConfig(String pkgDataDir) {
-        File configFile = new File(pkgDataDir, "files/" + CONFIG_FILE_NAME);
-        if (configFile.exists()) {
-            try (BufferedReader reader = new BufferedReader(new FileReader(configFile))) {
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    sb.append(line);
+    private static DriverConfig readDriverConfig(ApplicationInfo aInfo) {
+        File[] candidateConfigFiles = new File[]{
+            new File("/data/local/tmp/kaosgfx/" + aInfo.packageName + "/" + CONFIG_FILE_NAME),
+            new File("/data/local/tmp/kaosgfx/" + CONFIG_FILE_NAME),
+            new File("/sdcard/Android/data/" + aInfo.packageName + "/files/kaosgfx/" + CONFIG_FILE_NAME),
+            new File(aInfo.dataDir, "files/kaosgfx/" + CONFIG_FILE_NAME),
+            new File(aInfo.dataDir, "files/" + CONFIG_FILE_NAME)
+        };
+
+        for (File configFile : candidateConfigFiles) {
+            Log.i(TAG, "Evaluating staged config candidate: " + configFile.getAbsolutePath() + " (exists=" + configFile.exists() + ", canRead=" + configFile.canRead() + ")");
+            if (configFile.exists() && configFile.canRead()) {
+                try (BufferedReader reader = new BufferedReader(new FileReader(configFile))) {
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        sb.append(line);
+                    }
+                    String content = sb.toString();
+                    String driverDir = extractJsonField(content, "driverDir");
+                    String driverName = extractJsonField(content, "driverName");
+                    String driverId = extractJsonField(content, "driverId");
+
+                    if (driverName != null && !driverName.isEmpty()) {
+                        if (driverId != null && !driverId.isEmpty()) {
+                            driverDir = new File(aInfo.dataDir, "files/turnip/" + driverId).getAbsolutePath();
+                        } else if (driverDir == null || driverDir.isEmpty()) {
+                            driverDir = new File(aInfo.dataDir, "files/turnip").getAbsolutePath();
+                        }
+                        Log.i(TAG, "Loaded driver config from " + configFile.getAbsolutePath() + ": dir=" + driverDir + ", name=" + driverName + ", id=" + driverId);
+                        return new DriverConfig(driverDir, driverName);
+                    }
+                } catch (Throwable t) {
+                    Log.e(TAG, "Failed reading driver config from " + configFile.getAbsolutePath() + ": " + t.getMessage(), t);
                 }
-                String content = sb.toString();
-                // Simple parser without heavy json dependency: look for driverDir and driverName
-                String driverDir = extractJsonField(content, "driverDir");
-                String driverName = extractJsonField(content, "driverName");
-                if (driverDir != null && driverName != null) {
-                    return new DriverConfig(driverDir, driverName);
-                }
-            } catch (Throwable t) {
-                Log.e(TAG, "Failed to read driver config: " + t.getMessage());
             }
         }
 
         // Fallback default
         return new DriverConfig(
-            new File(pkgDataDir, "files/turnip").getAbsolutePath(),
+            new File(aInfo.dataDir, "files/turnip").getAbsolutePath(),
             "libvulkan_freedreno.so"
         );
+    }
+
+    private static String readTextFile(File file) {
+        if (!file.exists() || !file.canRead()) return "";
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line);
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     private static String extractJsonField(String json, String field) {
@@ -293,6 +423,21 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
                     try {
                         nativeRefreshHooks();
                     } catch (Throwable ignored) {}
+
+                    if (sPipelineActive && !sToastShown) {
+                        sToastShown = true;
+                        try {
+                            activity.runOnUiThread(() -> {
+                                try {
+                                    android.widget.Toast.makeText(
+                                        activity.getApplicationContext(),
+                                        "🎮 KaosGFX: Turnip Pipeline Active (" + sActiveDriverName + ")",
+                                        android.widget.Toast.LENGTH_LONG
+                                    ).show();
+                                } catch (Throwable ignored) {}
+                            });
+                        } catch (Throwable ignored) {}
+                    }
                 }
 
                 @Override public void onActivityResumed(Activity activity) {}

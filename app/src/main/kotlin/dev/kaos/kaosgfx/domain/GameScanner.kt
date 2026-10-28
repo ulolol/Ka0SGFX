@@ -61,13 +61,27 @@ class GameScanner(private val context: Context) {
             // Skip own app
             if (pkgName == context.packageName) continue
 
-            // Determine if it's a game or user app
+            val baseApkPath = appInfo.sourceDir ?: ""
+            if (baseApkPath.isEmpty() || !File(baseApkPath).exists()) continue
+
+            val isPatched = appInfo.appComponentFactory == BOOTSTRAP_FACTORY
+            val isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+            val isUpdatedSystemApp = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+            val isUserApp = !isSystemApp || isUpdatedSystemApp
+            val isLaunchable = pm.getLaunchIntentForPackage(pkgName) != null
+
+            // Determine if it's explicitly marked as a game
             val isGame = (appInfo.category == ApplicationInfo.CATEGORY_GAME) ||
                     (appInfo.flags and ApplicationInfo.FLAG_IS_GAME) != 0
 
-            val isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-            if (isSystemApp && !includeAllApps) continue
-            if (!isGame && !includeAllApps && !pkgName.contains("vkprobe")) continue
+            // Show all apps that can be patched:
+            // - All patched apps (always shown at top)
+            // - All user-installed apps and games
+            // - All launchable apps with an interface
+            // - Pure background system services only shown if includeAllApps is true
+            if (!isPatched && !isUserApp && !isLaunchable && !includeAllApps) {
+                continue
+            }
 
             val appName = try {
                 appInfo.loadLabel(pm).toString()
@@ -81,11 +95,8 @@ class GameScanner(private val context: Context) {
                 null
             }
 
-            val isPatched = appInfo.appComponentFactory == BOOTSTRAP_FACTORY
             val isDenylisted = DENYLIST.containsKey(pkgName)
             val denylistReason = DENYLIST[pkgName]
-
-            val baseApkPath = appInfo.sourceDir ?: ""
             val splitPaths = appInfo.splitSourceDirs?.toList() ?: emptyList()
 
             games.add(

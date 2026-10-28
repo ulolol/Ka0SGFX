@@ -17,7 +17,7 @@ class DriverManager(private val context: Context) {
         private const val TAG = "KaosGFX-DrvMgr"
     }
 
-    private val storageDir = File(context.filesDir, "drivers").apply { mkdirs() }
+    private val storageDir get() = DriverStorage.getDriversDir(context)
     private val json = Json { prettyPrint = true }
 
     suspend fun importDriverFromUri(uri: Uri, fileName: String): Result<DriverMetadata> = withContext(Dispatchers.IO) {
@@ -65,11 +65,37 @@ class DriverManager(private val context: Context) {
     }
 
     fun buildConfigJson(targetPackage: String, driver: DriverMetadata, enableAngle: Boolean = false): String {
+        var resolvedLibName = driver.libraryName
+
+        // Inspect meta.json from local zip file if present
+        val zipFile = driver.localPath?.let { File(it) }?.takeIf { it.exists() }
+            ?: File(storageDir, driver.fileName).takeIf { it.exists() }
+
+        if (zipFile != null) {
+            try {
+                ZipFile(zipFile).use { zip ->
+                    val metaEntry = zip.getEntry("meta.json")
+                    if (metaEntry != null) {
+                        val text = zip.getInputStream(metaEntry).bufferedReader().readText()
+                        val element = Json.parseToJsonElement(text)
+                        val name = (element as? kotlinx.serialization.json.JsonObject)?.get("libraryName")
+                        if (name != null) {
+                            resolvedLibName = name.toString().replace("\"", "").trim()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not inspect zip meta.json: ${e.message}")
+            }
+        }
+
         val config = DriverConfig(
             driverDir = "/data/user/0/$targetPackage/files/turnip/${driver.id}",
-            driverName = driver.libraryName,
+            driverName = resolvedLibName,
             hookLibDir = "",
-            enableAngle = enableAngle
+            enableAngle = enableAngle,
+            driverId = driver.id,
+            driverTitle = driver.name
         )
         return json.encodeToString(config)
     }

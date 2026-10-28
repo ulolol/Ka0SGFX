@@ -208,6 +208,36 @@ class PrivilegedClient(private val context: Context) {
         }
     }
 
+    suspend fun getDriverConfig(packageName: String): Result<String> = withContext(Dispatchers.IO) {
+        val service = getService().getOrElse { return@withContext Result.failure(it) }
+        try {
+            val config = service.getDriverConfig(packageName)
+            Result.success(config ?: "")
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getPipelineLogs(packageName: String, maxLines: Int = 150): Result<String> = withContext(Dispatchers.IO) {
+        val service = getService().getOrElse { return@withContext Result.failure(it) }
+        try {
+            val logs = service.getPipelineLogs(packageName, maxLines)
+            Result.success(logs ?: "")
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getPackageProcessId(packageName: String): Result<Int> = withContext(Dispatchers.IO) {
+        val service = getService().getOrElse { return@withContext Result.failure(it) }
+        try {
+            val pid = service.getPackageProcessId(packageName)
+            Result.success(pid)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     fun unbind() {
         try {
             Shizuku.unbindUserService(userServiceArgs, connection, true)

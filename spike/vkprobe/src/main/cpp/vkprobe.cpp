@@ -291,9 +291,17 @@ Java_dev_kaos_kaosgfx_spike_vkprobe_MainActivity_runStandardVulkanProbe(
         }
 
         out << "Device [" << i << "]: " << props2.properties.deviceName << "\n";
-        out << "Driver: " << driverProps.driverName << " (" << driverProps.driverInfo << ")\n";
-        LOGI("Standard Intercept Device [%u]: %s, Driver: %s (%s)",
-             i, props2.properties.deviceName, driverProps.driverName, driverProps.driverInfo);
+        out << "Driver Name: " << driverProps.driverName << "\n";
+        out << "Driver Info: " << driverProps.driverInfo << "\n";
+        out << "Driver ID: " << driverProps.driverID << "\n";
+        uint32_t apiVer = props2.properties.apiVersion;
+        out << "API Version: " << VK_API_VERSION_MAJOR(apiVer) << "."
+            << VK_API_VERSION_MINOR(apiVer) << "."
+            << VK_API_VERSION_PATCH(apiVer) << "\n";
+        out << "Raw Driver Version: 0x" << std::hex << props2.properties.driverVersion << std::dec << "\n";
+        LOGI("Standard Intercept Device [%u]: %s, Driver: %s (%s), ID: %u, API: %u.%u.%u",
+             i, props2.properties.deviceName, driverProps.driverName, driverProps.driverInfo,
+             driverProps.driverID, VK_API_VERSION_MAJOR(apiVer), VK_API_VERSION_MINOR(apiVer), VK_API_VERSION_PATCH(apiVer));
     }
 
     pfn_vkDestroyInstance(instance, nullptr);

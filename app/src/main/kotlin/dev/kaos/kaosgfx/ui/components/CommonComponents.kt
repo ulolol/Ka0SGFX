@@ -143,6 +143,21 @@ fun StorageBanner(
 }
 
 @Composable
+fun SimpleBadge(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .background(color.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Text(text = text, color = color, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
 fun StatusBadge(
     isPatched: Boolean,
     isDenylisted: Boolean,

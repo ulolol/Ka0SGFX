@@ -16,6 +16,10 @@
 - **OpenGL ES via ANGLE**: Integrated toggle to route OpenGL ES graphics API calls through Vulkan via Google's ANGLE translation layer.
 - **Privileged Automation via Shizuku**: Automates multi-split APK installations with `--bypass-low-target-sdk-block`, data preservation, and package lifecycle control without ADB cables after initial setup.
 - **Integrated Driver Catalog**: Connects directly to verified community releases (Banners-Turnip, K11MCH1, Whitebelyash, StevenMXZ, MrPurple) with background downloads and ETag caching.
+- **Real-Time Pipeline Monitoring**:
+  - **On-Screen Startup Toast**: Displays a visual indicator (`🎮 KaosGFX: Turnip Pipeline Active (<driver_name>)`) directly inside the game on launch.
+  - **Live Process & PID Tracking**: Real-time status indicator in game detail sheets showing whether the patched target process is running.
+  - **Integrated Logcat Inspector**: Direct log viewer in KaosGFX streaming graphics driver interception logs (`KaosGFX-Bootstrap`, `KaosGFX-Bridge`, `KaosGFX-PLTHook`, `Turnip`, `vulkan`) via privileged AIDL IPC.
 - **Automatic Crash Guard**: Implements an automatic rollback flag file mechanism; if a custom driver crashes on launch, KaosGFX rolls back to the stock driver on the next launch.
 - **Anti-Cheat Protection Policy**: Built-in denylist preventing modification of competitive titles (Genshin Impact, PUBG, CoD Mobile, Wild Rift, etc.) to safeguard user accounts.
 

@@ -31,10 +31,25 @@ interface IPrivilegedService {
     String getGlobalSetting(String key);
 
     /**
-     * Stages a custom driver zip and configuration into the app's external data directory
-     * (/sdcard/Android/data/<packageName>/files/kaosgfx/).
+     * Stages a custom driver zip and configuration into the app's accessible staging directory
+     * (/data/local/tmp/kaosgfx/<packageName>/).
      */
     boolean stageDriverBundle(String packageName, String driverZipPath, String configJson);
+
+    /**
+     * Reads the staged driver configuration JSON for a target package.
+     */
+    String getDriverConfig(String packageName);
+
+    /**
+     * Retrieves recent logcat entries filtered for graphics/turnip debugging.
+     */
+    String getPipelineLogs(String packageName, int maxLines);
+
+    /**
+     * Checks if the package currently has a running process and returns its PID, or -1 if not running.
+     */
+    int getPackageProcessId(String packageName);
 
     /**
      * Destroys the privileged service process.

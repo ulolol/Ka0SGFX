@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
 import okhttp3.Cache
 import okhttp3.OkHttpClient
@@ -38,28 +39,100 @@ class DriverCatalogRepository(private val context: Context) {
         isLenient = true
     }
 
-    private val storageDir = File(context.filesDir, "drivers").apply { mkdirs() }
+    private val storageDir get() = DriverStorage.getDriversDir(context)
+
+    private fun getCatalogCacheFile(): File {
+        val sharedDir = DriverStorage.getDriversDir(context)
+        return File(sharedDir, "catalog_cache.json")
+    }
+
+    private fun loadPersistentCatalogCache(): MutableList<DriverMetadata> {
+        val file = getCatalogCacheFile()
+        if (file.exists() && file.canRead()) {
+            try {
+                val text = file.readText()
+                return json.decodeFromString<List<DriverMetadata>>(text).toMutableList()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed reading catalog cache: ${e.message}")
+            }
+        }
+        return mutableListOf()
+    }
+
+    private fun savePersistentCatalogCache(drivers: List<DriverMetadata>) {
+        try {
+            val file = getCatalogCacheFile()
+            val text = json.encodeToString(drivers)
+            file.writeText(text)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed saving catalog cache: ${e.message}")
+        }
+    }
 
     suspend fun fetchAllSources(sources: List<DriverSource> = DEFAULT_SOURCES): List<DriverMetadata> = withContext(Dispatchers.IO) {
         val allDrivers = mutableListOf<DriverMetadata>()
+        val cachedCatalog = loadPersistentCatalogCache()
+        val builtin = getBuiltinCatalog()
+
         for (source in sources) {
             if (!source.isEnabled) continue
             try {
                 val drivers = fetchReleasesForSource(source)
-                allDrivers.addAll(drivers)
+                if (drivers.isNotEmpty()) {
+                    allDrivers.addAll(drivers)
+                } else {
+                    // Fall back to cached drivers for this source if rate limited or network failure
+                    val cachedForSource = cachedCatalog.filter {
+                        it.sourceRepo.equals("${source.repoOwner}/${source.repoName}", ignoreCase = true) ||
+                        it.id.startsWith(source.id, ignoreCase = true)
+                    }
+                    if (cachedForSource.isNotEmpty()) {
+                        allDrivers.addAll(cachedForSource)
+                    } else {
+                        val builtinForSource = builtin.filter {
+                            it.sourceRepo.equals("${source.repoOwner}/${source.repoName}", ignoreCase = true) ||
+                            it.id.startsWith(source.id, ignoreCase = true)
+                        }
+                        allDrivers.addAll(builtinForSource)
+                    }
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to fetch from ${source.name} (${source.repoOwner}/${source.repoName})", e)
+                val fallbackForSource = cachedCatalog.filter {
+                    it.sourceRepo.equals("${source.repoOwner}/${source.repoName}", ignoreCase = true) ||
+                    it.id.startsWith(source.id, ignoreCase = true)
+                }.ifEmpty {
+                    builtin.filter {
+                        it.sourceRepo.equals("${source.repoOwner}/${source.repoName}", ignoreCase = true) ||
+                        it.id.startsWith(source.id, ignoreCase = true)
+                    }
+                }
+                allDrivers.addAll(fallbackForSource)
             }
         }
 
         // Add built-in fallback/cached entries if list is empty
         if (allDrivers.isEmpty()) {
-            allDrivers.addAll(getBuiltinCatalog())
+            allDrivers.addAll(cachedCatalog.ifEmpty { builtin })
         }
 
+        // Deduplicate by ID
+        val distinctDrivers = allDrivers.distinctBy { it.id }.toMutableList()
+
+        // ALWAYS include all locally installed/downloaded drivers from storageDir
+        val localInstalled = getInstalledDrivers()
+        for (local in localInstalled) {
+            if (distinctDrivers.none { it.fileName.equals(local.fileName, ignoreCase = true) }) {
+                distinctDrivers.add(local)
+            }
+        }
+
+        // Save updated cache
+        savePersistentCatalogCache(distinctDrivers)
+
         // Mark installed status
-        markInstalledDrivers(allDrivers)
-        allDrivers
+        markInstalledDrivers(distinctDrivers)
+        distinctDrivers
     }
 
     suspend fun fetchReleasesForSource(source: DriverSource): List<DriverMetadata> = withContext(Dispatchers.IO) {
@@ -129,11 +202,18 @@ class DriverCatalogRepository(private val context: Context) {
     }
 
     fun markInstalledDrivers(drivers: List<DriverMetadata>) {
-        val installedFiles = storageDir.listFiles { _, name -> name.endsWith(".zip") } ?: emptyArray()
-        val installedMap = installedFiles.associateBy { it.name }
+        val dir = storageDir
+        val installedFiles = dir.listFiles { _, name -> name.endsWith(".zip", ignoreCase = true) } ?: emptyArray()
+        val installedMap = installedFiles.associateBy { it.name.lowercase() }
 
         for (driver in drivers) {
-            val localZip = installedMap[driver.fileName]
+            val localZip = installedMap[driver.fileName.lowercase()]
+                ?: installedFiles.firstOrNull { file ->
+                    file.name.equals(driver.fileName, ignoreCase = true) ||
+                    file.name.contains(driver.id, ignoreCase = true) ||
+                    (driver.fileName.isNotBlank() && file.name.contains(driver.fileName.substringBeforeLast("."), ignoreCase = true))
+                }
+
             if (localZip != null && localZip.exists()) {
                 driver.isInstalled = true
                 driver.localPath = localZip.absolutePath
@@ -204,6 +284,66 @@ class DriverCatalogRepository(private val context: Context) {
                 fileSize = 14200000L,
                 libraryName = "libvulkan_freedreno.so",
                 sourceRepo = "whitebelyash/AdrenoToolsDrivers"
+            ),
+            DriverMetadata(
+                id = "mrpurple_vturnip_mrpurple_T30-toasted.adpkg_turnip_mrpurple_T30-toasted.adpkg",
+                name = "turnip_mrpurple_T30-toasted.adpkg - turnip_mrpurple_T30-toasted.adpkg.zip",
+                version = "vturnip_mrpurple_T30-toasted.adpkg",
+                author = "MrPurple666",
+                description = "Turnip Mesa T30 driver with optimized Adreno 750 / 8 Gen 3 pipeline support.",
+                downloadUrl = "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T30-toasted.adpkg/turnip_mrpurple_T30-toasted.adpkg.zip",
+                fileName = "turnip_mrpurple_T30-toasted.adpkg.zip",
+                fileSize = 3713730L,
+                libraryName = "libvulkan_freedreno.so",
+                sourceRepo = "MrPurple666/purple-turnip"
+            ),
+            DriverMetadata(
+                id = "mrpurple_vturnip_mrpurple_T29-toasted.adpkg_turnip_mrpurple_T29-toasted.adpkg",
+                name = "turnip_mrpurple_T29-toasted.adpkg - turnip_mrpurple_T29-toasted.adpkg.zip",
+                version = "vturnip_mrpurple_T29-toasted.adpkg",
+                author = "MrPurple666",
+                description = "Turnip Mesa T29 driver with optimized Adreno 750 / 8 Gen 3 pipeline support.",
+                downloadUrl = "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T29-toasted.adpkg/turnip_mrpurple_T29-toasted.adpkg.zip",
+                fileName = "turnip_mrpurple_T29-toasted.adpkg.zip",
+                fileSize = 3680000L,
+                libraryName = "libvulkan_freedreno.so",
+                sourceRepo = "MrPurple666/purple-turnip"
+            ),
+            DriverMetadata(
+                id = "mrpurple_vturnip_mrpurple_T28-toasted.adpkg_turnip_mrpurple_T28-toasted.adpkg",
+                name = "turnip_mrpurple_T28-toasted.adpkg - turnip_mrpurple_T28-toasted.adpkg.zip",
+                version = "vturnip_mrpurple_T28-toasted.adpkg",
+                author = "MrPurple666",
+                description = "Turnip Mesa T28 driver with optimized Adreno 750 / 8 Gen 3 pipeline support.",
+                downloadUrl = "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T28-toasted.adpkg/turnip_mrpurple_T28-toasted.adpkg.zip",
+                fileName = "turnip_mrpurple_T28-toasted.adpkg.zip",
+                fileSize = 3650000L,
+                libraryName = "libvulkan_freedreno.so",
+                sourceRepo = "MrPurple666/purple-turnip"
+            ),
+            DriverMetadata(
+                id = "k11mch1_v840_Qualcomm_840_adpkg",
+                name = "Qualcomm Driver v840 - Qualcomm_840_adpkg.zip",
+                version = "v840",
+                author = "K11MCH1",
+                description = "Stock Qualcomm Proprietary Adreno Driver v840 package.",
+                downloadUrl = "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v840/Qualcomm_840_adpkg.zip",
+                fileName = "Qualcomm_840_adpkg.zip",
+                fileSize = 17385120L,
+                libraryName = "vkgsl.so",
+                sourceRepo = "K11MCH1/AdrenoToolsDrivers"
+            ),
+            DriverMetadata(
+                id = "k11mch1_v837_Qualcomm_837_adpkg",
+                name = "Qualcomm Driver v837 - Qualcomm_837_adpkg.zip",
+                version = "v837",
+                author = "K11MCH1",
+                description = "Stock Qualcomm Proprietary Adreno Driver v837 package.",
+                downloadUrl = "https://github.com/K11MCH1/AdrenoToolsDrivers/releases/download/v837/Qualcomm_837_adpkg.zip",
+                fileName = "Qualcomm_837_adpkg.zip",
+                fileSize = 17200000L,
+                libraryName = "vkgsl.so",
+                sourceRepo = "K11MCH1/AdrenoToolsDrivers"
             )
         )
     }

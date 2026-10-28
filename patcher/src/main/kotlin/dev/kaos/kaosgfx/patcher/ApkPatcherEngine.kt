@@ -47,17 +47,24 @@ class ApkPatcherEngine(
             // Replace manifest in apkModule with patched binary XML
             apkModule.add(ByteInputSource(manifestResult.patchedXmlBytes, "AndroidManifest.xml"))
 
-            // 2. Determine next DEX file name
+            // 2. Determine next DEX file name or replace existing bootstrap dex
             val dexFiles = apkModule.listDexFiles()
-            var highestDexIndex = 1
-            for (dex in dexFiles) {
-                val num = com.reandroid.archive.InputSource.getDexNumber(dex.name)
-                if (num > highestDexIndex) {
-                    highestDexIndex = num
+            val injectedDexName: String
+            if (manifestResult.wasAlreadyPatched && dexFiles.size > 1) {
+                // Was already patched: replace the last dex (injected bootstrap) instead of compounding dex files!
+                val lastDex = dexFiles.maxByOrNull { com.reandroid.archive.InputSource.getDexNumber(it.name) }
+                injectedDexName = lastDex?.name ?: "classes2.dex"
+            } else {
+                var highestDexIndex = 1
+                for (dex in dexFiles) {
+                    val num = com.reandroid.archive.InputSource.getDexNumber(dex.name)
+                    if (num > highestDexIndex) {
+                        highestDexIndex = num
+                    }
                 }
+                val nextDexIndex = if (dexFiles.isEmpty()) 1 else highestDexIndex + 1
+                injectedDexName = if (nextDexIndex == 1) "classes.dex" else "classes$nextDexIndex.dex"
             }
-            val nextDexIndex = if (dexFiles.isEmpty()) 1 else highestDexIndex + 1
-            val injectedDexName = if (nextDexIndex == 1) "classes.dex" else "classes$nextDexIndex.dex"
 
             // 3. Add injected bootstrap DEX
             val bootstrapDexBytes = readResourceBytes(BOOTSTRAP_DEX_RES)
@@ -122,6 +129,61 @@ class ApkPatcherEngine(
             ApkSignerUtil.signApk(
                 inputApk = tempUnsigned,
                 outputApk = outputSplit,
+                credentials = credentials
+            )
+        } finally {
+            apkModule.close()
+            tempUnsigned.delete()
+        }
+    }
+
+    fun unpatchBaseApk(inputPatchedApk: File, outputStockApk: File) {
+        val tempUnsigned = File.createTempFile("kaos_unpatch_unsigned_", ".apk")
+        val apkModule = ApkModule.loadApkFile(inputPatchedApk)
+        try {
+            // 1. Unpatch AndroidManifest.xml
+            val manifest = apkModule.androidManifest
+                ?: throw IllegalStateException("AndroidManifest.xml not found in ${inputPatchedApk.name}")
+
+            val unpatchedBytes = ManifestPatcher.unpatchManifestBytes(manifest.bytes)
+            apkModule.add(ByteInputSource(unpatchedBytes, "AndroidManifest.xml"))
+
+            // 2. Remove highest DEX file (which was the injected bootstrap DEX)
+            val dexFiles = apkModule.listDexFiles()
+            var highestDexIndex = 1
+            var highestDexName: String? = null
+            for (dex in dexFiles) {
+                val num = com.reandroid.archive.InputSource.getDexNumber(dex.name)
+                if (num >= highestDexIndex) {
+                    highestDexIndex = num
+                    highestDexName = dex.name
+                }
+            }
+            if (highestDexIndex > 1 && highestDexName != null) {
+                apkModule.removeInputSource(highestDexName)
+            }
+
+            // 3. Remove injected native hook libraries
+            for (lib in NATIVE_LIBS) {
+                apkModule.removeInputSource("lib/arm64-v8a/$lib")
+            }
+
+            // 4. Remove signatures
+            apkModule.removeDir("META-INF")
+
+            // 5. Realign & sign
+            val aligner = ZipAligner.apkAligner()
+            aligner.setFileAlignment(Pattern.compile(".*\\.so$"), 16384)
+
+            val writer = apkModule.createApkFileWriter(tempUnsigned)
+            writer.zipAligner = aligner
+            writer.write()
+            writer.close()
+
+            outputStockApk.parentFile?.mkdirs()
+            ApkSignerUtil.signApk(
+                inputApk = tempUnsigned,
+                outputApk = outputStockApk,
                 credentials = credentials
             )
         } finally {

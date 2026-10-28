@@ -135,11 +135,72 @@ KaosGFX (`dev.kaos.kaosgfx`) is an open-source, non-root graphics driver manager
 14. **System Server FUSE SELinux Denial (`u:object_r:fuse:s0`)**:
     - *Error*: `pm install /storage/emulated/0/...` failed with exit code 255: `System server has no access to read file context u:object_r:fuse:s0`. On modern Android, `system_server` is forbidden by SELinux from reading APKs from shared external FUSE storage directly.
     - *Fix*: In `PrivilegedService.kt`, staged the APKs into `/data/local/tmp/kaos_staging/` (which has context `u:object_r:shell_data_file:s0` and is world-readable by `system_server`) before executing `pm install`, then automatically cleaned up staging files upon completion.
+15. **Driver Packaging & Unpacking Across Storage Boundaries**:
+    - *Error*: Custom Turnip driver binary (`libvulkan_freedreno.so`) was missing inside `/data/user/0/<pkg>/files/turnip/` because Shizuku stages driver zips to external storage (`/sdcard/Android/data/<pkg>/files/kaosgfx/driver.zip`) and Android enforces W^X (`noexec`) on external storage.
+    - *Fix*: Added automated driver download in `PatchOrchestrator.kt`, enhanced `TurnipAppComponentFactory.java` to inspect both external and internal staging paths, extract `driver.zip` into `files/turnip/` on first launch inside the app's own security context, and mark extracted `.so` files executable.
+16. **Pipeline Visibility & Real-time Verification**:
+    - *Feature*: Added multi-layer verification for active custom driver pipelines:
+      1. On-Screen Startup Toast: Injected `TurnipAppComponentFactory` automatically displays a confirmation toast (`🎮 KaosGFX: Turnip Pipeline Active (<driver_name>)`) when the game starts.
+      2. In-App Live Pipeline Status: `GameDetailSheet.kt` monitors the live process state (`Running (PID: ...)` vs `Idle`) via Shizuku.
+      3. Live Logcat Stream: Added `Inspect Live Pipeline Logs` dialog directly in `GameDetailSheet.kt` powered by privileged `getPipelineLogs` AIDL call filtering `KaosGFX-Bootstrap`, `KaosGFX-Bridge`, `KaosGFX-PLTHook`, `Turnip`, and `vulkan`.
+17. **App Listing & Game Detection Criteria**:
+    - *Issue*: Castlevania (`jp.konami.epjCastlevania1`) and many user games/emulators were hidden because they did not explicitly declare `android:appCategory="game"` or `FLAG_IS_GAME` in their manifest.
+    - *Fix*: Removed the restrictive game category filter. `GameScanner.kt` now lists all patchable user-installed applications, launchable apps, and patched apps, prioritizing patched apps at the top of the list. Added a "System Apps" toggle in `GamesScreen.kt` for optionally displaying system packages.
+18. **Game Detail Sheet Layout & Driver Search UX**:
+    - *Issue*: Long catalog driver lists required excessive scrolling to reach the ANGLE toggle and action buttons.
+    - *Fix*: Reorganized `GameDetailSheet.kt` to place the "Enable ANGLE" toggle, "Update / Patch Custom Driver" button, and "Restore to Stock" button right at the top directly under the header/status card. Added an active driver summary card and an instant driver search bar filtering by name, version, author, and library name.
+19. **Complete Stock Restoration Engine**:
+    - *Issue*: "Restore to Stock Configuration" was passing `null` for `originalApk`, merely resetting ANGLE and leaving the patched APK with `TurnipAppComponentFactory` installed on the device.
+    - *Fix*: Implemented end-to-end stock restoration in `PatchOrchestrator.kt`, `ApkPatcherEngine.kt`, and `ManifestPatcher.kt`:
+      1. Pre-patch stock backup: `patchAndInstallGame` now creates a pristine backup of `base.apk` at `${packageName}-stock.apk` before patching.
+      2. Dynamic unpatch fallback: If no prior stock backup exists on disk, `unpatchBaseApk` reverses the binary XML modifications (removing `TurnipAppComponentFactory` and restoring any original factory), deletes the injected bootstrap DEX and the 7 native hook libraries, and signs the restored APK.
+      3. Complete cleanup: Installs the stock APK via privileged installer, removes staged driver files from `/sdcard/Android/data/<pkg>/files/kaosgfx`, resets ANGLE routing, force-stops the app, and triggers a full game list refresh.
+20. **Unified Shared Download Storage for Driver Archives & Cross-Process Staging**:
+    - *Issue*: `DriverDownloader.kt`, `DriverManager.kt`, and `DriverCatalogRepository.kt` previously stored driver archives in internal private app storage (`/data/user/0/dev.kaos.kaosgfx/files/drivers/`). Because Shizuku's `PrivilegedService` executes under shell UID 2000, Android DAC / SELinux boundaries (`0700` owned by app UID `u0_a304`) prevented UID 2000 from reading the driver `.zip` when staging to `/sdcard/Android/data/<pkg>/files/kaosgfx/driver.zip`.
+    - *Fix*: Implemented `DriverStorage.kt` to maintain all downloaded driver archives directly in the shared public directory (`/sdcard/Download/KaosGFX/`) alongside APKs. Added automated legacy migration transferring existing archives from app-private files into `Download/KaosGFX/`.
+21. **Deterministic Active Driver Resolution in Game Detail Sheet**:
+    - *Issue*: In `GameDetailSheet.kt`, `selectedDriver` defaulted to K11MCH1 v840 because all Turnip drivers share `libraryName = "libvulkan_freedreno.so"` and heuristic matching fell back to matching on library name.
+    - *Fix*: Extended `DriverConfig` to embed `driverId` and `driverTitle` directly in `kaosgfx_driver_config.json`. Updated `GameDetailSheet.kt` to match by exact `driverId`, `driverTitle`, or driver directory prefix/suffix, preventing any fallback to generic library names and accurately preselecting and badging the active driver.
+22. **Android Scoped Storage Data Isolation & Driver List UI Layout**:
+    - *Issue*: On Android 11+ (API 30+), Scoped Storage denies non-root apps access to `/sdcard/Android/data/<other_package>` even with `MANAGE_EXTERNAL_STORAGE` permission granted. Attempting to read `kaosgfx_driver_config.json` directly from `/sdcard/Android/data/...` returned Permission Denied, causing `activeConfig` to evaluate to `null` and defaulting `selectedDriver` to the first downloaded driver (v840). Additionally, long driver names (e.g., `turnip_mrpurple_T30-toasted.adpkg - turnip_mrpurple_T30-toasted.adpkg.zip`) in `GameDetailSheet` lacked layout weight, pushing the `Downloaded` badge completely off the right edge of the screen.
+    - *Fix*: 
+      1. Added `getDriverConfig(packageName)` to `IPrivilegedService.aidl` allowing UID 2000 to read active driver configs across Scoped Storage boundaries.
+      2. Configured `PatchOrchestrator.kt` to store a public shared copy of driver configs in `/sdcard/Download/KaosGFX/configs/${packageName}.json` for instant, permission-free reading.
+      3. Updated `GameDetailSheet.kt` to read from the shared configs directory and asynchronously query Shizuku if needed, automatically synchronizing `selectedDriver` to `activeDriver`.
+      4. Constrained driver item rows with `Modifier.weight(1f)` and text truncation (`maxLines = 1, overflow = TextOverflow.Ellipsis`), ensuring badges are always visible.
+      5. Enhanced `markInstalledDrivers` with case-insensitive and filename/ID fuzzy matching.
+23. **GitHub API Rate-Limit Fallback & Interactive VKProbe Live Verification UI**:
+    - *Issue*: GitHub API unauthenticated requests (60 requests/hour/IP) hit HTTP 403 on the target device, causing `DriverCatalogRepository.kt` to drop releases for MrPurple and other sources. Furthermore, VKProbe's test UI was cluttered with raw logs and extracted its own bundled asset driver on launch instead of cleanly displaying the live in-process Vulkan driver being used by the system.
+    - *Fix*:
+      1. Implemented persistent catalog caching in `/sdcard/Download/KaosGFX/catalog_cache.json`. When GitHub rate limits (403), the repository automatically falls back to cached releases per source.
+      2. Added built-in catalog definitions for MrPurple (T30, T29, T28) and K11MCH1 (v840, v837), and guaranteed that `getInstalledDrivers()` from `/sdcard/Download/KaosGFX/` are always merged into the catalog.
+      3. Completely redesigned VKProbe's UI with a high-contrast status dashboard displaying the active Vulkan device name, driver name, driver info, Vulkan API version, driver ID, and an unmistakable badge: `[🟢 CUSTOM TURNIP DRIVER ACTIVE]` or `[⚪ STOCK SYSTEM DRIVER ACTIVE (Qualcomm Adreno)]`. Added a "Re-scan Active Driver" button so users can instantly verify driver changes after patching.
+24. **Driver Dynamic Library Auto-Discovery & Zero-Hardcoding Pipeline**:
+    - *Issue*: Custom driver zip packages use varying library names inside their archives (`vulkan.purple.so` for MrPurple T30, `vulkan.adreno.so` for Qualcomm 840, `libvulkan_freedreno.so` for Banners). Because the catalog previously defaulted `libraryName` to `libvulkan_freedreno.so`, `TurnipAppComponentFactory` failed to find `libvulkan_freedreno.so` inside the extracted directory and fell back to loading the stale test driver (`files/turnip/libvulkan_freedreno.so`).
+    - *Fix*:
+      1. Updated `DriverManager.kt` `buildConfigJson` to inspect `meta.json` from the local driver zip on disk and write the exact `libraryName` into `kaosgfx_driver_config.json`.
+      2. Updated `TurnipAppComponentFactory.java` to inspect `meta.json` inside `driverDir` and dynamically autodetect any valid `.so` library, removing the stale fallback.
+      3. Rebuilt `bootstrap.dex` with D8 and updated `PatchOrchestrator.kt` stock APK backup logic.
+      4. Installed official Sascha Willems **Vulkan Hardware Capability Viewer** (`de.saschawillems.vulkancapsviewer`) on device as an independent industry benchmark tool.
 
 ---
 
 ### Task Completion Status
 - [x] Phase 0: Standalone `vkprobe` spike verified on physical hardware.
+  - **Issue**: Patched apps (Vulkan Caps Viewer `de.saschawillems.vulkancapsviewer` and VKProbe `dev.kaos.kaosgfx.spike.vkprobe`) displayed logcat error: `Custom driver not found at ... skipping hook injection`.
+    - *Empirical Diagnostics & Root Cause Analysis*:
+      1. Android W^X & Scoped Storage: Target retail applications run in the `untrusted_app` SELinux domain without external storage permissions (`READ_EXTERNAL_STORAGE` / `MANAGE_EXTERNAL_STORAGE`).
+      2. Traversal blocked: Path traversal of `/sdcard/Android/data/<package>/` via standard Java `File` APIs throws `Permission denied` when executed within early app startup before `ContextImpl` is instantiated.
+      3. Android Linker W^X: `linker64` prevents loading shared libraries (`dlopen`) directly from external storage or FUSE filesystems due to `noexec` mounts.
+      4. Stale Injected DEX Shadowing: `PatchOrchestrator.kt` previously passed `baseApk` (the currently installed, already-patched APK) into `ApkPatcherEngine.patchBaseApk` instead of the pristine `stockBackup`. Each successive patch appended a new DEX (`classes2.dex`, `classes3.dex`, `classes4.dex`, `classes5.dex`). Because ART/Dalvik classloaders load classes from the first DEX in order, the original stale `classes2.dex` (which lacked `/data/local/tmp` lookups) permanently shadowed the newer DEXes.
+    - *Fix Implemented*:
+      1. Updated `PrivilegedService.kt` to stage `driver.zip` and `kaosgfx_driver_config.json` to `/data/local/tmp/kaosgfx/<packageName>/` with full world-readable permissions (`chmod -R 777`). Untrusted app domains have verified read access to `/data/local/tmp`.
+      2. Updated `TurnipAppComponentFactory.java` to evaluate `/data/local/tmp/kaosgfx/<packageName>/` as the primary configuration and driver zip candidate, unpacking into the app's internal executable storage (`aInfo.dataDir + "/files/turnip/<driverId>"`), where `dlopen` has complete `r-x` permissions.
+      3. Updated `PatchOrchestrator.kt` to always patch from the pristine `stockBackup` rather than an already patched APK, preventing DEX accumulation.
+      4. Updated `ApkPatcherEngine.kt` so that if an already-patched APK is encountered, it replaces the existing injected DEX instead of compounding additional DEX files.
+      5. Updated VKProbe's `MainActivity.kt` config reader and `PatchOrchestrator.kt` unpatcher to synchronize with `/data/local/tmp/kaosgfx/<packageName>/`.
+      6. Recompiled `bootstrap.dex` and rebuilt `app-debug.apk` and `vkprobe-debug.apk`.
+
 - [x] Phase 1: Native bridge, PLT/GOT hook engine, bootstrap DEX.
 - [x] Phase 2: APK patcher engine (manifest, DEX, libs, alignment, v1-v3 signing).
 - [x] Phase 3: Shizuku privileged service & AIDL IPC.
