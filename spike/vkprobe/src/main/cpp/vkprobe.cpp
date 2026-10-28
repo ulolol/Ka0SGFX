@@ -197,3 +197,105 @@ Java_dev_kaos_kaosgfx_spike_vkprobe_MainActivity_runProbe(
     pfn_vkDestroyInstance(instance, nullptr);
     return env->NewStringUTF(out.str().c_str());
 }
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_kaos_kaosgfx_spike_vkprobe_MainActivity_runStandardVulkanProbe(
+    JNIEnv *env,
+    jobject /* this */
+) {
+    LOGI("Starting runStandardVulkanProbe (testing standard game dlopen interception)...");
+    std::ostringstream out;
+
+    void *vk = dlopen("libvulkan.so", RTLD_NOW);
+    if (!vk) {
+        LOGE("Standard dlopen(libvulkan.so) failed: %s", dlerror());
+        out << "ERROR: dlopen(libvulkan.so) failed: " << dlerror();
+        return env->NewStringUTF(out.str().c_str());
+    }
+    LOGI("dlopen(libvulkan.so) returned %p", vk);
+
+    auto pfn_vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        dlsym(vk, "vkGetInstanceProcAddr")
+    );
+    if (!pfn_vkGetInstanceProcAddr) {
+        LOGE("dlsym(vkGetInstanceProcAddr) failed");
+        out << "ERROR: dlsym(vkGetInstanceProcAddr) failed";
+        return env->NewStringUTF(out.str().c_str());
+    }
+
+    auto pfn_vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+        dlsym(vk, "vkCreateInstance")
+    );
+    if (!pfn_vkCreateInstance) {
+        pfn_vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+            pfn_vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance")
+        );
+    }
+
+    if (!pfn_vkCreateInstance) {
+        LOGE("Failed to find vkCreateInstance");
+        out << "ERROR: Failed to find vkCreateInstance";
+        return env->NewStringUTF(out.str().c_str());
+    }
+
+    VkApplicationInfo appInfo{};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "KaosGFX Standard Game Simulation";
+    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.pEngineName = "TestEngine";
+    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.apiVersion = VK_API_VERSION_1_1;
+
+    VkInstanceCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+
+    VkInstance instance = VK_NULL_HANDLE;
+    VkResult res = pfn_vkCreateInstance(&createInfo, nullptr, &instance);
+    if (res != VK_SUCCESS || instance == VK_NULL_HANDLE) {
+        LOGE("Standard vkCreateInstance failed (code %d)", res);
+        out << "ERROR: vkCreateInstance failed (code " << res << ")";
+        return env->NewStringUTF(out.str().c_str());
+    }
+
+    LOGI("Standard vkCreateInstance succeeded: instance=%p", instance);
+
+    auto pfn_vkEnumeratePhysicalDevices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        pfn_vkGetInstanceProcAddr(instance, "vkEnumeratePhysicalDevices")
+    );
+    auto pfn_vkGetPhysicalDeviceProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+        pfn_vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2")
+    );
+    auto pfn_vkDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+        pfn_vkGetInstanceProcAddr(instance, "vkDestroyInstance")
+    );
+
+    uint32_t count = 0;
+    pfn_vkEnumeratePhysicalDevices(instance, &count, nullptr);
+    std::vector<VkPhysicalDevice> devices(count);
+    pfn_vkEnumeratePhysicalDevices(instance, &count, devices.data());
+
+    out << "STANDARD_GAME_INTERCEPT_SUCCESS\n";
+    out << "Devices Count: " << count << "\n";
+
+    for (uint32_t i = 0; i < count; ++i) {
+        VkPhysicalDeviceDriverProperties driverProps{};
+        driverProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &driverProps;
+
+        if (pfn_vkGetPhysicalDeviceProperties2) {
+            pfn_vkGetPhysicalDeviceProperties2(devices[i], &props2);
+        }
+
+        out << "Device [" << i << "]: " << props2.properties.deviceName << "\n";
+        out << "Driver: " << driverProps.driverName << " (" << driverProps.driverInfo << ")\n";
+        LOGI("Standard Intercept Device [%u]: %s, Driver: %s (%s)",
+             i, props2.properties.deviceName, driverProps.driverName, driverProps.driverInfo);
+    }
+
+    pfn_vkDestroyInstance(instance, nullptr);
+    return env->NewStringUTF(out.str().c_str());
+}

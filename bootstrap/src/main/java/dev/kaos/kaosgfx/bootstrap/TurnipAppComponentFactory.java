@@ -9,6 +9,7 @@ import android.content.ContentProvider;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
+import android.os.Bundle;
 import android.util.Log;
 
 import java.io.BufferedReader;
@@ -39,6 +40,7 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
     );
 
     public static native void nativeClearCrashGuard(String pkgDataDir);
+    public static native void nativeRefreshHooks();
 
     private static synchronized void initKaosGFX(ApplicationInfo aInfo) {
         if (sInitialized) return;
@@ -63,6 +65,13 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
 
         // 3. Load bridge and dependencies
         loadNativeLibraries(hookLibDir);
+
+        try {
+            com.bytedance.android.bytehook.ByteHook.init();
+            Log.i(TAG, "ByteHook.init() succeeded in Java runtime");
+        } catch (Throwable t) {
+            Log.w(TAG, "ByteHook.init() in Java warning: " + t.getMessage());
+        }
 
         // 4. Resolve driver directory & filename from config or defaults
         DriverConfig config = readDriverConfig(aInfo.dataDir);
@@ -176,6 +185,7 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
 
     private static void loadNativeLibraries(String hookLibDir) {
         String[] libs = new String[]{
+            "libshadowhook.so",
             "libbytehook.so",
             "libkaosgfx_bridge.so"
         };
@@ -265,19 +275,51 @@ public class TurnipAppComponentFactory extends AppComponentFactory {
     @Override
     public Application instantiateApplication(ClassLoader cl, String className)
             throws InstantiationException, IllegalAccessException, ClassNotFoundException {
-        if (sOriginalFactory != null) {
-            return sOriginalFactory.instantiateApplication(cl, className);
+        Application app = (sOriginalFactory != null)
+                ? sOriginalFactory.instantiateApplication(cl, className)
+                : super.instantiateApplication(cl, className);
+        try {
+            nativeRefreshHooks();
+            app.registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
+                @Override
+                public void onActivityCreated(Activity activity, Bundle savedInstanceState) {
+                    try {
+                        nativeRefreshHooks();
+                    } catch (Throwable ignored) {}
+                }
+
+                @Override
+                public void onActivityStarted(Activity activity) {
+                    try {
+                        nativeRefreshHooks();
+                    } catch (Throwable ignored) {}
+                }
+
+                @Override public void onActivityResumed(Activity activity) {}
+                @Override public void onActivityPaused(Activity activity) {}
+                @Override public void onActivityStopped(Activity activity) {}
+                @Override public void onActivitySaveInstanceState(Activity activity, Bundle outState) {}
+                @Override public void onActivityDestroyed(Activity activity) {}
+            });
+            Log.i(TAG, "Registered ActivityLifecycleCallbacks for continuous hook enforcement");
+        } catch (Throwable t) {
+            Log.w(TAG, "Hook setup in instantiateApplication: " + t.getMessage());
         }
-        return super.instantiateApplication(cl, className);
+        return app;
     }
 
     @Override
     public Activity instantiateActivity(ClassLoader cl, String className, Intent intent)
             throws InstantiationException, IllegalAccessException, ClassNotFoundException {
-        if (sOriginalFactory != null) {
-            return sOriginalFactory.instantiateActivity(cl, className, intent);
+        Activity act = (sOriginalFactory != null)
+                ? sOriginalFactory.instantiateActivity(cl, className, intent)
+                : super.instantiateActivity(cl, className, intent);
+        try {
+            nativeRefreshHooks();
+        } catch (Throwable t) {
+            Log.w(TAG, "nativeRefreshHooks in instantiateActivity failed: " + t.getMessage());
         }
-        return super.instantiateActivity(cl, className, intent);
+        return act;
     }
 
     @Override

@@ -131,6 +131,14 @@ Java_dev_kaos_kaosgfx_bootstrap_TurnipAppComponentFactory_nativeInit(
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_dev_kaos_kaosgfx_bootstrap_TurnipAppComponentFactory_nativeRefreshHooks(
+    JNIEnv * /* env */,
+    jclass /* clazz */
+) {
+    refresh_hooks();
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_dev_kaos_kaosgfx_bootstrap_TurnipAppComponentFactory_nativeClearCrashGuard(
     JNIEnv *env,
     jclass /* clazz */,

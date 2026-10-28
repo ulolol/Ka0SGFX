@@ -47,6 +47,7 @@ android {
 
 dependencies {
     implementation("com.bytedance:bytehook:1.1.1")
+    implementation("com.bytedance.android:shadowhook:1.1.1")
 }
 
 tasks.register("packageNativeLibsToPatcherResources") {
@@ -65,6 +66,7 @@ tasks.register("packageNativeLibsToPatcherResources") {
         val libs = listOf(
             "libkaosgfx_bridge.so",
             "libbytehook.so",
+            "libshadowhook.so",
             "libhook_impl.so",
             "libfile_redirect_hook.so",
             "libmain_hook.so",
@@ -74,7 +76,7 @@ tasks.register("packageNativeLibsToPatcherResources") {
         for (lib in libs) {
             val file = File(srcDir, lib)
             if (file.exists()) {
-                val dest = File(patcherArm64Dir, lib)
+                val dest = File(patcherArm64Dir, "$lib.bin")
                 file.copyTo(dest, overwrite = true)
                 logger.lifecycle("Copied $lib (${dest.length()} bytes) to ${dest.absolutePath}")
             } else {

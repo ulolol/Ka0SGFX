@@ -25,3 +25,7 @@ rootProject.name = "KaosGFX"
 include(":spike:vkprobe")
 include(":bridge")
 include(":bootstrap")
+include(":patcher")
+include(":privileged")
+include(":drivers")
+include(":app")

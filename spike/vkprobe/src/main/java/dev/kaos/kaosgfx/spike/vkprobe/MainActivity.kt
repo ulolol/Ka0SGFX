@@ -27,6 +27,8 @@ class MainActivity : Activity() {
         customDriverName: String
     ): String
 
+    private external fun runStandardVulkanProbe(): String
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -42,8 +44,19 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val result = executeProbe()
+
+                try {
+                    val factoryClz = Class.forName("dev.kaos.kaosgfx.bootstrap.TurnipAppComponentFactory")
+                    val refreshMethod = factoryClz.getMethod("nativeRefreshHooks")
+                    refreshMethod.invoke(null)
+                    Log.i(TAG, "Explicitly called nativeRefreshHooks before runStandardVulkanProbe")
+                } catch (t: Throwable) {
+                    Log.w(TAG, "nativeRefreshHooks invocation: " + t.message)
+                }
+
+                val standardResult = runStandardVulkanProbe()
                 runOnUiThread {
-                    textView.append("\n" + result)
+                    textView.append("\n" + result + "\n\nStandard Game Intercept Test:\n" + standardResult)
                 }
             } catch (e: Throwable) {
                 Log.e(TAG, "Error executing probe", e)
