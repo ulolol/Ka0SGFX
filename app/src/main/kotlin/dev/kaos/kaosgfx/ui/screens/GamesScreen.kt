@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import dev.kaos.kaosgfx.domain.GameApp
 import dev.kaos.kaosgfx.privileged.ShizukuState
 import dev.kaos.kaosgfx.ui.components.ShizukuBanner
+import dev.kaos.kaosgfx.ui.components.StorageBanner
 import dev.kaos.kaosgfx.ui.components.StatusBadge
 import dev.kaos.kaosgfx.ui.theme.*
 
@@ -35,6 +36,7 @@ fun GamesScreen(
     shizukuState: ShizukuState,
     onRefresh: () -> Unit,
     onRequestShizuku: () -> Unit,
+    onRequestStorage: () -> Unit,
     onSelectGame: (GameApp) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -78,6 +80,11 @@ fun GamesScreen(
             ShizukuBanner(
                 state = shizukuState,
                 onRequestPermission = onRequestShizuku,
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+
+            StorageBanner(
+                onRequestPermission = onRequestStorage,
                 modifier = Modifier.padding(bottom = 12.dp)
             )
 

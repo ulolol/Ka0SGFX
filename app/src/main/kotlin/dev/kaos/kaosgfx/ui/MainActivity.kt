@@ -1,9 +1,16 @@
 package dev.kaos.kaosgfx.ui
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -87,6 +94,26 @@ class MainActivity : ComponentActivity() {
         var patchProgressStep by remember { mutableStateOf<String?>(null) }
         var patchProgressPercent by remember { mutableFloatStateOf(0f) }
 
+        val storageLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.StartActivityForResult()
+        ) {
+            // Refreshes view state when returning from settings
+        }
+
+        fun requestStoragePermission() {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    storageLauncher.launch(intent)
+                } catch (e: Exception) {
+                    val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    storageLauncher.launch(intent)
+                }
+            }
+        }
+
         fun loadGames() {
             lifecycleScope.launch {
                 isGamesLoading = true
@@ -150,6 +177,7 @@ class MainActivity : ComponentActivity() {
                                 app.privilegedClient.requestPermission()
                             }
                         },
+                        onRequestStorage = { requestStoragePermission() },
                         onSelectGame = { selectedGame = it }
                     )
 

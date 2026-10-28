@@ -1,10 +1,13 @@
 package dev.kaos.kaosgfx.ui.components
 
+import android.os.Build
+import android.os.Environment
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -87,6 +90,53 @@ fun ShizukuBanner(
                 ) {
                     Text(actionText, color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun StorageBanner(
+    onRequestPermission: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) return
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = PrimaryBlue.copy(alpha = 0.15f))
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Folder,
+                contentDescription = null,
+                tint = PrimaryNeon,
+                modifier = Modifier.size(28.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Downloads Storage Access",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                    color = TextPrimary
+                )
+                Text(
+                    text = "Grant All Files access to save patched APKs to Downloads/KaosGFX.",
+                    fontSize = 12.sp,
+                    color = TextSecondary
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(
+                onClick = onRequestPermission,
+                colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeon)
+            ) {
+                Text("Grant", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
     }

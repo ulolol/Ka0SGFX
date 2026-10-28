@@ -2,6 +2,7 @@ package dev.kaos.kaosgfx.domain
 
 import android.content.Context
 import android.util.Log
+import android.os.Environment
 import dev.kaos.kaosgfx.drivers.DriverMetadata
 import dev.kaos.kaosgfx.drivers.DriverManager
 import dev.kaos.kaosgfx.patcher.ApkPatcherEngine
@@ -22,7 +23,21 @@ class PatchOrchestrator(
         private const val TAG = "KaosGFX-Orchestrator"
     }
 
-    private val workDir = File(context.cacheDir, "patch_work").apply { mkdirs() }
+    private fun getWorkDir(): File {
+        val downloadKaos = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "KaosGFX")
+        if (downloadKaos.exists() || downloadKaos.mkdirs()) {
+            return downloadKaos
+        }
+        val extFiles = context.getExternalFilesDir("patch_work")
+        if (extFiles != null && (extFiles.exists() || extFiles.mkdirs())) {
+            return extFiles
+        }
+        val extCache = context.externalCacheDir
+        if (extCache != null && (extCache.exists() || extCache.mkdirs())) {
+            return File(extCache, "patch_work").apply { mkdirs() }
+        }
+        return File("/sdcard/Download/KaosGFX").apply { mkdirs() }
+    }
 
     suspend fun patchAndInstallGame(
         game: GameApp,
@@ -46,16 +61,22 @@ class PatchOrchestrator(
         try {
             // Step 1: Patch APK
             onProgress("Patching base APK (injecting bootstrap DEX and native hooks)...", 0.2f)
+            val workDir = getWorkDir()
             val patchedApk = File(workDir, "${game.packageName}-patched.apk")
             if (patchedApk.exists()) patchedApk.delete()
 
             patcherEngine.patchBaseApk(baseApk, patchedApk)
             Log.i(TAG, "Patched APK successfully written to ${patchedApk.absolutePath}")
 
-            // Step 2: Install via Shizuku
+            // Step 2: Install via Shizuku (with automatic data backup & signature mismatch handling)
             onProgress("Installing patched APK via privileged PackageInstaller...", 0.5f)
             val splitFiles = game.splitApkPaths.map { File(it) }
-            val installResult = privilegedClient.installApk(patchedApk, splitFiles)
+            val installResult = privilegedClient.installApk(
+                game.packageName,
+                patchedApk,
+                splitFiles,
+                allowReinstallOnSignatureMismatch = true
+            )
             if (installResult.isFailure) {
                 return@withContext Result.failure(
                     installResult.exceptionOrNull() ?: RuntimeException("Installation failed")
@@ -80,9 +101,6 @@ class PatchOrchestrator(
             onProgress("Finalizing setup and stopping stale process...", 1.0f)
             privilegedClient.forceStop(game.packageName)
 
-            // Clean up temporary patched APK
-            patchedApk.delete()
-
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to patch and install ${game.packageName}", e)
@@ -94,7 +112,12 @@ class PatchOrchestrator(
         try {
             if (originalApk != null && originalApk.exists()) {
                 val splitFiles = game.splitApkPaths.map { File(it) }
-                privilegedClient.installApk(originalApk, splitFiles).getOrThrow()
+                privilegedClient.installApk(
+                    game.packageName,
+                    originalApk,
+                    splitFiles,
+                    allowReinstallOnSignatureMismatch = true
+                ).getOrThrow()
             }
             privilegedClient.setAngleDriver(game.packageName, AngleDriverType.DEFAULT)
             privilegedClient.forceStop(game.packageName)

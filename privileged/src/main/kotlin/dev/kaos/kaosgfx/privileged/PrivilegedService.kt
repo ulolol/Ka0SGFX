@@ -3,10 +3,7 @@ package dev.kaos.kaosgfx.privileged
 import android.os.Process
 import android.util.Log
 import androidx.annotation.Keep
-import java.io.BufferedReader
 import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStreamReader
 import java.util.regex.Pattern
 import kotlin.system.exitProcess
 
@@ -23,22 +20,79 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     override fun installPackage(baseApkPath: String, splitApkPaths: List<String>?): Int {
+        val resultStr = installPackageDetailed("", baseApkPath, splitApkPaths, true)
+        return if (resultStr.isEmpty()) 0 else -1
+    }
+
+    override fun installPackageDetailed(
+        packageName: String,
+        baseApkPath: String,
+        splitApkPaths: List<String>?,
+        allowReinstallOnSignatureMismatch: Boolean
+    ): String {
         val baseFile = File(baseApkPath)
         if (!baseFile.exists()) {
-            Log.e(TAG, "Base APK not found at $baseApkPath")
-            return -1
+            val msg = "Base APK not found at $baseApkPath (readable: ${baseFile.canRead()})"
+            Log.e(TAG, msg)
+            return msg
         }
 
         val splits = splitApkPaths?.filter { File(it).exists() } ?: emptyList()
 
-        return if (splits.isEmpty()) {
+        var result = if (splits.isEmpty()) {
             installSingleApk(baseFile)
         } else {
             installSplitApks(baseFile, splits)
         }
+
+        val isSigMismatch = result.combinedOutput.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE", ignoreCase = true) ||
+                result.combinedOutput.contains("signatures do not match", ignoreCase = true)
+
+        if (!result.isSuccess && isSigMismatch && allowReinstallOnSignatureMismatch && packageName.isNotBlank()) {
+            Log.w(TAG, "Signature mismatch detected for $packageName. Performing data backup and fresh install...")
+
+            val dataDir = File("/sdcard/Android/data/$packageName")
+            val dataBak = File("/sdcard/Android/data/${packageName}.kaos_bak")
+            val obbDir = File("/sdcard/Android/obb/$packageName")
+            val obbBak = File("/sdcard/Android/obb/${packageName}.kaos_bak")
+
+            try {
+                if (dataDir.exists()) dataDir.renameTo(dataBak)
+                if (obbDir.exists()) obbDir.renameTo(obbBak)
+
+                // Uninstall previous package
+                val uninstRes = executeCommand(listOf("pm", "uninstall", "--user", "0", packageName))
+                Log.i(TAG, "pm uninstall exit: ${uninstRes.exitCode}, out: ${uninstRes.stdout}")
+
+                // Re-attempt install
+                result = if (splits.isEmpty()) {
+                    installSingleApk(baseFile)
+                } else {
+                    installSplitApks(baseFile, splits)
+                }
+            } finally {
+                // Restore backup
+                if (dataBak.exists()) {
+                    if (dataDir.exists()) dataDir.deleteRecursively()
+                    dataBak.renameTo(dataDir)
+                }
+                if (obbBak.exists()) {
+                    if (obbDir.exists()) obbDir.deleteRecursively()
+                    obbBak.renameTo(obbDir)
+                }
+            }
+        }
+
+        return if (result.isSuccess) {
+            ""
+        } else {
+            result.combinedOutput.ifEmpty { "Installation exited with code ${result.exitCode}" }
+        }
     }
 
-    private fun installSingleApk(apk: File): Int {
+    private data class InstallRunResult(val isSuccess: Boolean, val exitCode: Int, val combinedOutput: String)
+
+    private fun installSingleApk(apk: File): InstallRunResult {
         Log.i(TAG, "Installing single APK: ${apk.absolutePath}")
         val cmd = listOf(
             "pm", "install",
@@ -47,18 +101,15 @@ class PrivilegedService : IPrivilegedService.Stub() {
             apk.absolutePath
         )
         val result = executeCommand(cmd)
-        Log.i(TAG, "pm install exit: ${result.exitCode}, out: ${result.stdout}, err: ${result.stderr}")
-        return if (result.exitCode == 0 && result.stdout.contains("Success", ignoreCase = true)) {
-            0
-        } else {
-            if (result.exitCode != 0) result.exitCode else -2
-        }
+        val combined = "${result.stdout}\n${result.stderr}".trim()
+        Log.i(TAG, "pm install exit: ${result.exitCode}, combined: $combined")
+        val isOk = result.exitCode == 0 && combined.contains("Success", ignoreCase = true)
+        return InstallRunResult(isOk, result.exitCode, combined)
     }
 
-    private fun installSplitApks(baseApk: File, splitApkPaths: List<String>): Int {
+    private fun installSplitApks(baseApk: File, splitApkPaths: List<String>): InstallRunResult {
         Log.i(TAG, "Installing multi-split APK: base=${baseApk.absolutePath}, ${splitApkPaths.size} splits")
 
-        // 1. Create install session
         val createCmd = listOf(
             "pm", "install-create",
             "-r", "-d", "-t",
@@ -66,20 +117,20 @@ class PrivilegedService : IPrivilegedService.Stub() {
         )
         val createRes = executeCommand(createCmd)
         if (createRes.exitCode != 0) {
-            Log.e(TAG, "pm install-create failed: ${createRes.stderr}")
-            return createRes.exitCode
+            val err = "pm install-create failed: ${createRes.stderr} ${createRes.stdout}"
+            Log.e(TAG, err)
+            return InstallRunResult(false, createRes.exitCode, err)
         }
 
         val matcher = SESSION_PATTERN.matcher(createRes.stdout)
         if (!matcher.find()) {
-            Log.e(TAG, "Failed to parse session ID from: ${createRes.stdout}")
-            return -3
+            val err = "Failed to parse session ID from: ${createRes.stdout}"
+            Log.e(TAG, err)
+            return InstallRunResult(false, -3, err)
         }
-        val sessionId = matcher.group(1) ?: return -3
-        Log.i(TAG, "Created install session: $sessionId")
+        val sessionId = matcher.group(1) ?: return InstallRunResult(false, -3, "Null session ID")
 
         try {
-            // 2. Write base APK
             val writeBaseCmd = listOf(
                 "pm", "install-write",
                 "-S", baseApk.length().toString(),
@@ -89,12 +140,12 @@ class PrivilegedService : IPrivilegedService.Stub() {
             )
             val writeBaseRes = executeCommand(writeBaseCmd)
             if (writeBaseRes.exitCode != 0) {
-                Log.e(TAG, "pm install-write base failed: ${writeBaseRes.stderr}")
+                val err = "pm install-write base failed: ${writeBaseRes.stderr} ${writeBaseRes.stdout}"
+                Log.e(TAG, err)
                 abandonSession(sessionId)
-                return writeBaseRes.exitCode
+                return InstallRunResult(false, writeBaseRes.exitCode, err)
             }
 
-            // 3. Write each split APK
             for ((index, splitPath) in splitApkPaths.withIndex()) {
                 val splitFile = File(splitPath)
                 val splitName = "split_$index.apk"
@@ -107,26 +158,24 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 )
                 val writeSplitRes = executeCommand(writeSplitCmd)
                 if (writeSplitRes.exitCode != 0) {
-                    Log.e(TAG, "pm install-write split $splitName failed: ${writeSplitRes.stderr}")
+                    val err = "pm install-write split $splitName failed: ${writeSplitRes.stderr} ${writeSplitRes.stdout}"
+                    Log.e(TAG, err)
                     abandonSession(sessionId)
-                    return writeSplitRes.exitCode
+                    return InstallRunResult(false, writeSplitRes.exitCode, err)
                 }
             }
 
-            // 4. Commit session
             val commitCmd = listOf("pm", "install-commit", sessionId)
             val commitRes = executeCommand(commitCmd)
-            Log.i(TAG, "pm install-commit exit: ${commitRes.exitCode}, out: ${commitRes.stdout}, err: ${commitRes.stderr}")
+            val combined = "${commitRes.stdout}\n${commitRes.stderr}".trim()
+            Log.i(TAG, "pm install-commit exit: ${commitRes.exitCode}, combined: $combined")
 
-            return if (commitRes.exitCode == 0 && commitRes.stdout.contains("Success", ignoreCase = true)) {
-                0
-            } else {
-                if (commitRes.exitCode != 0) commitRes.exitCode else -4
-            }
+            val isOk = commitRes.exitCode == 0 && combined.contains("Success", ignoreCase = true)
+            return InstallRunResult(isOk, commitRes.exitCode, combined)
         } catch (e: Exception) {
             Log.e(TAG, "Exception during multi-split install", e)
             abandonSession(sessionId)
-            return -5
+            return InstallRunResult(false, -5, e.message ?: "Exception in split install")
         }
     }
 
@@ -163,11 +212,9 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 targetDir.mkdirs()
             }
 
-            // Write configuration JSON
             val configFile = File(targetDir, "kaosgfx_driver_config.json")
             configFile.writeText(configJson)
 
-            // If a driver zip path is provided, copy it to targetDir/driver.zip
             if (!driverZipPath.isNullOrEmpty()) {
                 val srcZip = File(driverZipPath)
                 if (srcZip.exists()) {

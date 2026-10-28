@@ -9,6 +9,13 @@ interface IPrivilegedService {
     int installPackage(String baseApkPath, in List<String> splitApkPaths);
 
     /**
+     * Installs an APK with full error reporting and automatic signature-mismatch
+     * reinstallation (data/obb backup -> uninstall -> install -> restore).
+     * Returns empty string on success, or detailed error message on failure.
+     */
+    String installPackageDetailed(String packageName, String baseApkPath, in List<String> splitApkPaths, boolean allowReinstallOnSignatureMismatch);
+
+    /**
      * Force-stops a package.
      */
     void forceStop(String packageName);

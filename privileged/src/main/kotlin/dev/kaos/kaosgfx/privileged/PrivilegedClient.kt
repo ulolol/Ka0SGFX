@@ -129,14 +129,24 @@ class PrivilegedClient(private val context: Context) {
         }
     }
 
-    suspend fun installApk(baseApk: File, splitApks: List<File> = emptyList()): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun installApk(
+        packageName: String,
+        baseApk: File,
+        splitApks: List<File> = emptyList(),
+        allowReinstallOnSignatureMismatch: Boolean = true
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         val service = getService().getOrElse { return@withContext Result.failure(it) }
         val splitPaths = splitApks.map { it.absolutePath }
-        val exitCode = service.installPackage(baseApk.absolutePath, splitPaths)
-        if (exitCode == 0) {
+        val errorMsg = service.installPackageDetailed(
+            packageName,
+            baseApk.absolutePath,
+            splitPaths,
+            allowReinstallOnSignatureMismatch
+        )
+        if (errorMsg.isNullOrEmpty()) {
             Result.success(Unit)
         } else {
-            Result.failure(RuntimeException("Package installation failed with error code: $exitCode"))
+            Result.failure(RuntimeException(errorMsg))
         }
     }
 

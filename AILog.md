@@ -126,6 +126,12 @@ KaosGFX (`dev.kaos.kaosgfx`) is an open-source, non-root graphics driver manager
 11. **Serialization Default Field Omission**:
     - *Error*: `testDriverModelsSerialization` failed on `libraryName` assertion.
     - *Fix*: Configured Json serializer with `encodeDefaults = true`.
+12. **Package Installation Failed -1 (Private Storage Boundary)**:
+    - *Error*: `PrivilegedService` reported `Base APK not found at /data/user/0/dev.kaos.kaosgfx/cache/...` because UID 2000 (shell) cannot enter `u0_aXXX` mode 700 private directories.
+    - *Fix*: Redirected patch working directory to `Downloads/KaosGFX/` and `context.getExternalFilesDir("patch_work")` on shared external storage (`/sdcard/`) where UID 2000 has read access.
+13. **Signature Mismatch on Retail Game Update (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`)**:
+    - *Error*: Android Package Manager refuses `pm install -r` if the replacement APK signature does not match the original Play Store key.
+    - *Fix*: Implemented `installPackageDetailed` in `PrivilegedService.kt` with automatic signature-mismatch recovery (backs up `/sdcard/Android/data` and `/obb`, executes `pm uninstall --user 0`, installs the patched APK, and restores data directories). Added `MANAGE_EXTERNAL_STORAGE` permission.
 
 ---
 
