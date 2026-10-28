@@ -132,6 +132,9 @@ KaosGFX (`dev.kaos.kaosgfx`) is an open-source, non-root graphics driver manager
 13. **Signature Mismatch on Retail Game Update (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`)**:
     - *Error*: Android Package Manager refuses `pm install -r` if the replacement APK signature does not match the original Play Store key.
     - *Fix*: Implemented `installPackageDetailed` in `PrivilegedService.kt` with automatic signature-mismatch recovery (backs up `/sdcard/Android/data` and `/obb`, executes `pm uninstall --user 0`, installs the patched APK, and restores data directories). Added `MANAGE_EXTERNAL_STORAGE` permission.
+14. **System Server FUSE SELinux Denial (`u:object_r:fuse:s0`)**:
+    - *Error*: `pm install /storage/emulated/0/...` failed with exit code 255: `System server has no access to read file context u:object_r:fuse:s0`. On modern Android, `system_server` is forbidden by SELinux from reading APKs from shared external FUSE storage directly.
+    - *Fix*: In `PrivilegedService.kt`, staged the APKs into `/data/local/tmp/kaos_staging/` (which has context `u:object_r:shell_data_file:s0` and is world-readable by `system_server`) before executing `pm install`, then automatically cleaned up staging files upon completion.
 
 ---
 
