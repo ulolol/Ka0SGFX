@@ -23,3 +23,5 @@ dependencyResolutionManagement {
 rootProject.name = "KaosGFX"
 
 include(":spike:vkprobe")
+include(":bridge")
+include(":bootstrap")

@@ -21,6 +21,12 @@ KaosGFX is an open-source, non-root graphics driver manager and instrumentation 
 3. Created initial `README.md` and `AILog.md`.
 4. Implemented Phase 0: Standalone `spike/vkprobe` module linking `libadrenotools`, bundling a Mesa Turnip 27.0.0-devel driver package in assets, and executing an empirical Vulkan probe on the vivo I2220 (Adreno 750 / Android 16).
 5. Tested on physical device `10BDC11TCR0004P`: Verified successful `adrenotools_open_libvulkan`, `vkCreateInstance`, and enumeration of `Turnip Adreno (TM) 750` reporting Vulkan 1.4.363 (`VK_DRIVER_ID_MESA_TURNIP`).
+6. Implemented Phase 1: Native bridge and bootstrap dex:
+   - Created `bridge` module with `libkaosgfx_bridge.so`, integrating ByteHook (via Maven AAR `com.bytedance:bytehook:1.1.1`) and `libadrenotools`.
+   - Implemented `hooks.cpp` with `BYTEHOOK_MODE_MANUAL`, hooking `dlopen`, `dlsym`, `android_dlopen_ext`, `dlclose`, `vkGetInstanceProcAddr`, and `vkCreateInstance`. Suppressed `dlclose(g_vk)` to prevent unload during engine startup capability probes. Preserved caller-namespace lookups via `__loader_dlopen`/`__loader_dlsym`.
+   - Implemented crash-guard in `bridge.cpp` using `/data/user/0/<pkg>/files/kaosgfx_crash_flag`.
+   - Created `bootstrap` module with `TurnipAppComponentFactory.java` chaining to original `AppComponentFactory`, extracting native hook libs if `extractNativeLibs="false"`, loading bridge, and triggering `nativeInit`.
+   - Configured build pipeline to assemble `classes.dex` via `d8` into `patcher/src/main/resources/bootstrap.dex` and strip release `.so` binaries into `patcher/src/main/resources/arm64-v8a/`.
 
 ### Issues & Fixes
 - **Issue**: AGP 9.0 rejected `org.jetbrains.kotlin.android` plugin ("plugin is no longer required for Kotlin support since AGP 9.0") and complained about `kotlinOptions`.
@@ -29,12 +35,16 @@ KaosGFX is an open-source, non-root graphics driver manager and instrumentation 
   - **Fix**: Corrected path to `${CMAKE_CURRENT_SOURCE_DIR}/../../../../../third_party/libadrenotools`.
 - **Issue**: `vkprobe.cpp` attempted to query `vkEnumeratePhysicalDevices` using `vkGetInstanceProcAddr(VK_NULL_HANDLE, ...)`.
   - **Fix**: Updated to query `vkEnumeratePhysicalDevices` with the valid `instance` handle returned by `vkCreateInstance`.
+- **Issue**: `android_dlextinfo` undeclared in `hooks.cpp`.
+  - **Fix**: Added `#include <android/dlext.h>`.
+- **Issue**: `d8` rejected directory input for classes when invoking D8 CLI.
+  - **Fix**: Passed individual `.class` file paths dynamically gathered by Gradle.
 
 ### Progress
 - [x] Project architecture plan approved.
 - [x] Workspace initialized.
 - [x] Phase 0: Standalone `vkprobe` spike verified on target device.
-- [ ] Phase 1: Native bridge and bootstrap dex.
+- [x] Phase 1: Native bridge and bootstrap dex.
 - [ ] Phase 2: APK patcher engine.
 - [ ] Phase 3: Shizuku privileged service & Compose app.
 - [ ] Phase 3b: Driver catalog & probe validation.
