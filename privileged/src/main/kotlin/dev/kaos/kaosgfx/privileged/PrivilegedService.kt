@@ -39,54 +39,72 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
         val splits = splitApkPaths?.filter { File(it).exists() } ?: emptyList()
 
-        var result = if (splits.isEmpty()) {
-            installSingleApk(baseFile)
-        } else {
-            installSplitApks(baseFile, splits)
-        }
+        // Stage APKs to /data/local/tmp/kaos_staging so system_server can read them without FUSE SELinux denial
+        val stagingDir = File("/data/local/tmp/kaos_staging").apply { mkdirs() }
+        val stagedBase = File(stagingDir, "base.apk")
 
-        val isSigMismatch = result.combinedOutput.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE", ignoreCase = true) ||
-                result.combinedOutput.contains("signatures do not match", ignoreCase = true)
+        try {
+            baseFile.copyTo(stagedBase, overwrite = true)
+            executeCommand(listOf("chmod", "644", stagedBase.absolutePath))
 
-        if (!result.isSuccess && isSigMismatch && allowReinstallOnSignatureMismatch && packageName.isNotBlank()) {
-            Log.w(TAG, "Signature mismatch detected for $packageName. Performing data backup and fresh install...")
+            val stagedSplits: List<String> = splits.mapIndexed { index, splitPath ->
+                val dest = File(stagingDir, "split_$index.apk")
+                File(splitPath).copyTo(dest, overwrite = true)
+                executeCommand(listOf("chmod", "644", dest.absolutePath))
+                dest.absolutePath
+            }
 
-            val dataDir = File("/sdcard/Android/data/$packageName")
-            val dataBak = File("/sdcard/Android/data/${packageName}.kaos_bak")
-            val obbDir = File("/sdcard/Android/obb/$packageName")
-            val obbBak = File("/sdcard/Android/obb/${packageName}.kaos_bak")
+            var result = if (stagedSplits.isEmpty()) {
+                installSingleApk(stagedBase)
+            } else {
+                installSplitApks(stagedBase, stagedSplits)
+            }
 
-            try {
-                if (dataDir.exists()) dataDir.renameTo(dataBak)
-                if (obbDir.exists()) obbDir.renameTo(obbBak)
+            val isSigMismatch = result.combinedOutput.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE", ignoreCase = true) ||
+                    result.combinedOutput.contains("signatures do not match", ignoreCase = true)
 
-                // Uninstall previous package
-                val uninstRes = executeCommand(listOf("pm", "uninstall", "--user", "0", packageName))
-                Log.i(TAG, "pm uninstall exit: ${uninstRes.exitCode}, out: ${uninstRes.stdout}")
+            if (!result.isSuccess && isSigMismatch && allowReinstallOnSignatureMismatch && packageName.isNotBlank()) {
+                Log.w(TAG, "Signature mismatch detected for $packageName. Performing data backup and fresh install...")
 
-                // Re-attempt install
-                result = if (splits.isEmpty()) {
-                    installSingleApk(baseFile)
-                } else {
-                    installSplitApks(baseFile, splits)
-                }
-            } finally {
-                // Restore backup
-                if (dataBak.exists()) {
-                    if (dataDir.exists()) dataDir.deleteRecursively()
-                    dataBak.renameTo(dataDir)
-                }
-                if (obbBak.exists()) {
-                    if (obbDir.exists()) obbDir.deleteRecursively()
-                    obbBak.renameTo(obbDir)
+                val dataDir = File("/sdcard/Android/data/$packageName")
+                val dataBak = File("/sdcard/Android/data/${packageName}.kaos_bak")
+                val obbDir = File("/sdcard/Android/obb/$packageName")
+                val obbBak = File("/sdcard/Android/obb/${packageName}.kaos_bak")
+
+                try {
+                    if (dataDir.exists()) dataDir.renameTo(dataBak)
+                    if (obbDir.exists()) obbDir.renameTo(obbBak)
+
+                    // Uninstall previous package
+                    val uninstRes = executeCommand(listOf("pm", "uninstall", "--user", "0", packageName))
+                    Log.i(TAG, "pm uninstall exit: ${uninstRes.exitCode}, out: ${uninstRes.stdout}")
+
+                    // Re-attempt install
+                    result = if (stagedSplits.isEmpty()) {
+                        installSingleApk(stagedBase)
+                    } else {
+                        installSplitApks(stagedBase, stagedSplits)
+                    }
+                } finally {
+                    // Restore backup
+                    if (dataBak.exists()) {
+                        if (dataDir.exists()) dataDir.deleteRecursively()
+                        dataBak.renameTo(dataDir)
+                    }
+                    if (obbBak.exists()) {
+                        if (obbDir.exists()) obbDir.deleteRecursively()
+                        obbBak.renameTo(obbDir)
+                    }
                 }
             }
-        }
 
-        return if (result.isSuccess) {
-            ""
-        } else {
-            result.combinedOutput.ifEmpty { "Installation exited with code ${result.exitCode}" }
+            return if (result.isSuccess) {
+                ""
+            } else {
+                result.combinedOutput.ifEmpty { "Installation exited with code ${result.exitCode}" }
+            }
+        } finally {
+            stagingDir.deleteRecursively()
         }
     }
 
