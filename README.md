@@ -103,8 +103,8 @@ KaosGFX/
 
 ### 1. Clone with Submodules
 ```bash
-git clone --recursive https://github.com/kaos/KaosGFX.git
-cd KaosGFX
+git clone --recursive https://github.com/ulolol/Ka0SGFX.git
+cd Ka0SGFX
 ```
 
 ### 2. Configure Local Properties
