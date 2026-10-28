@@ -212,6 +212,8 @@ KaosGFX (`dev.kaos.kaosgfx`) is an open-source, non-root graphics driver manager
       2. Switched search states (`searchQuery` in `GamesScreen`, `driverSearchQuery` in `GameDetailSheet`, `selectedSourceId` in `CatalogScreen`) and screen navigation states to `rememberSaveable`.
       3. Tracked `selectedGamePackage` via `rememberSaveable` so open game detail sheets persist across orientation changes and recompositions.
 
+  - **License Update**: Updated project licensing to **GNU Affero General Public License v3 (AGPL-3.0)** (Copyright (C) 2026 Vidish (Kaos)). Synchronized `README.md` badges and license sections.
+
 - [x] Phase 1: Native bridge, PLT/GOT hook engine, bootstrap DEX.
 - [x] Phase 2: APK patcher engine (manifest, DEX, libs, alignment, v1-v3 signing).
 - [x] Phase 3: Shizuku privileged service & AIDL IPC.

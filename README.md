@@ -1,6 +1,6 @@
 # KaosGFX
 
-[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Android%209%20to%2016-green.svg)](https://developer.android.com)
 [![Architecture](https://img.shields.io/badge/Arch-arm64--v8a-orange.svg)](https://developer.android.com/ndk)
 [![Vulkan](https://img.shields.io/badge/Vulkan-1.3%20%7C%201.4-red.svg)](https://www.vulkan.org)
@@ -154,7 +154,7 @@ Contributions, bug reports, and driver compatibility profiles are welcome! Pleas
 
 ## License
 
-KaosGFX is licensed under the **BSD-3-Clause License**. See [LICENSE](LICENSE) for details.
+KaosGFX is licensed under the **GNU Affero General Public License v3 (AGPL-3.0)**. See [LICENSE](LICENSE) for details.
 
 Third-Party Components:
 - `libadrenotools`: BSD-2-Clause License
