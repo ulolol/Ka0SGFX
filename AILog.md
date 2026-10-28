@@ -214,6 +214,8 @@ KaosGFX (`dev.kaos.kaosgfx`) is an open-source, non-root graphics driver manager
 
   - **License Update**: Updated project licensing to **GNU Affero General Public License v3 (AGPL-3.0)** (Copyright (C) 2026 Vidish (Kaos)). Synchronized `README.md` badges and license sections.
 
+  - **Release Published**: Created and uploaded GitHub Pre-release `v1.0.0-preview` on [`https://github.com/ulolol/Ka0SGFX/releases/tag/v1.0.0-preview`](https://github.com/ulolol/Ka0SGFX/releases/tag/v1.0.0-preview) containing `KaosGFX-v1.0.0-preview.apk` (64.99 MB) and companion diagnostic probe `VKProbe-v1.0.0.apk` (5.56 MB).
+
 - [x] Phase 1: Native bridge, PLT/GOT hook engine, bootstrap DEX.
 - [x] Phase 2: APK patcher engine (manifest, DEX, libs, alignment, v1-v3 signing).
 - [x] Phase 3: Shizuku privileged service & AIDL IPC.
