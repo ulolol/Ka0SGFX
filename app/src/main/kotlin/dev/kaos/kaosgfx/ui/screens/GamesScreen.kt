@@ -18,16 +18,20 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.draw.scale
 import dev.kaos.kaosgfx.domain.GameApp
+import dev.kaos.kaosgfx.drivers.AdrenoGpu
+import dev.kaos.kaosgfx.privileged.ModePreference
+import dev.kaos.kaosgfx.privileged.OperatingMode
+import dev.kaos.kaosgfx.privileged.RootStatus
 import dev.kaos.kaosgfx.privileged.ShizukuState
-import dev.kaos.kaosgfx.ui.components.ShizukuBanner
-import dev.kaos.kaosgfx.ui.components.StorageBanner
+import dev.kaos.kaosgfx.ui.components.PrivilegeModeBanner
 import dev.kaos.kaosgfx.ui.components.StatusBadge
+import dev.kaos.kaosgfx.ui.components.StorageBanner
 import dev.kaos.kaosgfx.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -35,7 +39,12 @@ import dev.kaos.kaosgfx.ui.theme.*
 fun GamesScreen(
     games: List<GameApp>,
     isLoading: Boolean,
+    detectedGpu: AdrenoGpu,
+    operatingMode: OperatingMode,
+    rootStatus: RootStatus,
     shizukuState: ShizukuState,
+    modePreference: ModePreference,
+    onChangeModePreference: (ModePreference) -> Unit,
     includeSystemApps: Boolean = false,
     onToggleSystemApps: ((Boolean) -> Unit)? = null,
     onRefresh: () -> Unit,
@@ -45,7 +54,6 @@ fun GamesScreen(
     modifier: Modifier = Modifier
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
-    var showAllApps by rememberSaveable { mutableStateOf(false) }
 
     val filteredGames = remember(games, searchQuery) {
         if (searchQuery.isBlank()) games
@@ -61,7 +69,11 @@ fun GamesScreen(
                 title = {
                     Column {
                         Text("KaosGFX", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = PrimaryNeon)
-                        Text("Vulkan & GLES Driver Injector", fontSize = 12.sp, color = TextSecondary)
+                        Text(
+                            text = "${detectedGpu.displayName} • ${operatingMode.label}",
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
                     }
                 },
                 actions = {
@@ -81,9 +93,13 @@ fun GamesScreen(
                 .fillMaxSize()
                 .padding(horizontal = 16.dp)
         ) {
-            ShizukuBanner(
-                state = shizukuState,
-                onRequestPermission = onRequestShizuku,
+            PrivilegeModeBanner(
+                operatingMode = operatingMode,
+                rootStatus = rootStatus,
+                shizukuState = shizukuState,
+                modePreference = modePreference,
+                onChangeModePreference = onChangeModePreference,
+                onRequestShizukuPermission = onRequestShizuku,
                 modifier = Modifier.padding(bottom = 12.dp)
             )
 
@@ -121,7 +137,11 @@ fun GamesScreen(
                     .padding(bottom = 10.dp)
             ) {
                 Text(
-                    text = "${filteredGames.size} patchable apps",
+                    text = if (operatingMode == OperatingMode.ROOT) {
+                        "${filteredGames.size} apps (Zero-Patch Root Ready)"
+                    } else {
+                        "${filteredGames.size} patchable apps"
+                    },
                     fontSize = 12.sp,
                     color = TextSecondary,
                     fontWeight = FontWeight.Medium
@@ -228,7 +248,8 @@ fun GameCard(
                 Spacer(modifier = Modifier.height(6.dp))
                 StatusBadge(
                     isPatched = game.isPatched,
-                    isDenylisted = game.isDenylisted
+                    isDenylisted = game.isDenylisted,
+                    isRootActive = game.isRootActive
                 )
             }
         }

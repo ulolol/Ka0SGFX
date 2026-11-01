@@ -224,3 +224,42 @@ KaosGFX (`dev.kaos.kaosgfx`) is an open-source, non-root graphics driver manager
 - [x] Phase 5: GLES via ANGLE integration.
 - [x] Phase 6: All unit tests passing across all modules.
 - [x] Physical device installation and runtime verification complete.
+
+
+---
+
+## 2026-11-01: Zero-Patch Root Engine & Hardware GPU Generation Filtering (`A6xx` / `A7xx` / `A8xx`)
+
+### Key Findings & Empirical Reverse Engineering
+1. **Target Hardware Profile (`73ccb990`)**:
+   - Device: Xiaomi POCO F7 / Redmi Turbo 4 Pro (`25053PC47I`, board `sun` / `onyx`), Qualcomm Snapdragon 8s Gen 4 (`SM8735` / `SM8845`), **Adreno 825 (`A8xx`)** GPU.
+   - OS: Android 16 (API 36), Linux 6.6.77, 4KB Page Size, **KernelSU Next (`ksud 3.0.1`)** without Zygisk.
+   - Stock Vulkan Driver: `com.qualcomm.qti.gpudrivers.sun.api35` (`/vendor/lib64/hw/vulkan.adreno.so`).
+
+2. **Empirical Disassembly of Android 16 Vulkan & GraphicsEnvironment Loader**:
+   - Disassembled `/system/bin/gpuservice` (`0x6d464`–`0x6d58c`), `/system/lib64/libgraphicsenv.so` (`0xb60c`–`0xb900`), `/system/lib64/libvulkan.so` (`EnsureInitialized` at `0x1e76c`–`0x1e950` and `LoadUpdatedDriver` at `0x22538`–`0x22680`), `/system/lib64/libhwui.so` (`zygote_preload_graphics` at `0x71a704`), and `/system/framework/framework.jar` (`GraphicsEnvironment.chooseDriver` at `0x257fe0`, `chooseDriverInternal` at `0x25869c`, and `chooseAbi` at `0x257ab0`).
+   - **Why `live-gpu-driver`'s post-fork `inotify` bind-mount is insufficient on its own on Android 16**:
+     - `zygote64` calls `zygote_preload_graphics()` -> `vkEnumerateInstanceVersion()` at boot, preloading `/vendor/lib64/hw/vulkan.adreno.so` into `g_datachunk->hal_module_` (`[x22, #0xf8]`) in `libvulkan.so`.
+     - However, in `libvulkan.so` (`EnsureInitialized` at `0x1e7b4`–`0x1e8a8`), every forked app process calls `GraphicsEnv::getInstance().getDriverNamespace()`. When `getDriverNamespace()` returns non-null, `libvulkan.so` logs `"Unload builtin Vulkan driver."`, unloads the Zygote-preloaded HAL via `android_unload_sphal_library()`, and loads `vulkan.${ro.hardware.vulkan}.so` (`vulkan.adreno.so`) from the `updatable gfx driver` namespace!
+   - **Zero-Patch, Zero-Zygisk, Zero-Reboot Per-App Root Mechanism**:
+     - Adding a target `packageName` to `Settings.Global.updatable_driver_production_opt_in_apps` causes `GraphicsEnvironment.chooseDriverInternal` to bypass allowlist/denylist/debuggable checks and select `SystemProperties.get("ro.gfx.driver.0")`.
+     - `chooseDriver` queries `PackageManager.getPackageInfo(driverPkg, MATCH_SYSTEM_ONLY | GET_META_DATA)` (`0x00100080`), which requires the carrier package to satisfy 5 conditions: (1) `FLAG_SYSTEM`, (2) `forceQueryable=true`, (3) `targetSdkVersion >= 26`, (4) `primaryCpuAbi == "arm64-v8a"`, and (5) `applicationInfo.metaData != null`.
+     - Staging `vulkan.adreno.so` into a qualifying system carrier's `lib/arm64` directory (e.g. `com.google.android.apps.wellbeing`, `com.google.android.tts`, or an overlay on `com.google.android.ext.services`), setting `resetprop ro.gfx.driver.0 <carrierPkg>`, and opting in `<targetPkg>` in `updatable_driver_production_opt_in_apps` loads the custom Turnip/Adreno driver per-app with **zero APK modification, zero signature change, and zero race condition**.
+
+3. **Empirical Verification of GPU Generation Filtering Importance**:
+   - Loading a standard `A6xx/A7xx` Turnip build (`The412Banner` `20261027-r5`) on Adreno 825 caused Mesa to log `E TU : ../src/freedreno/vulkan/tu_device.cc:1715: device (chip_id = 44030000, gpu_id = 6830) is unsupported (VK_ERROR_INCOMPATIBLE_DRIVER)` and abort `RenderThread`.
+   - Loading an `A8xx` Turnip build (`StevenMXZ/Adreno-Tools-Drivers` `Turnip_Gen8_V38.zip`) on the exact same unpatched app succeeded cleanly (`D vulkan : Unload builtin Vulkan driver.`, `I MESA : Using fallback gralloc implementation`).
+
+### Implementation Summary
+1. **`drivers/GpuInfo.kt`**:
+   - Implemented `AdrenoGen` (`A6XX`, `A7XX`, `A8XX`, `UNKNOWN`), `AdrenoGpu`, and `GpuDetector` with 3-tier hardware detection (`/sys/class/kgsl/kgsl-3d0/gpu_model` -> 1x1 Pbuffer EGL `GL_RENDERER` -> `Build.SOC_MODEL` lookup table).
+2. **`drivers/GpuSupportParser.kt`, `DriverModels.kt`, & `DriverCatalogRepository.kt`**:
+   - Implemented multi-source release & asset parser handling asset tags (`-A8xx`, `Gen8`, `710-720`, `8G2`), sibling asset disambiguation (standard `Turnip-*.zip` vs `-A8xx.zip` in `Banners-Turnip`), release body tables (`Unified: A6XX, A7XX, A8XX`, `For a7xx. Maybe a6xx.`), and driver type classification (`Mesa Turnip` vs `Qualcomm Blob`).
+   - Added unit test suite `GpuSupportParserTest.kt`.
+3. **`privileged/RootDriverManager.kt` & `PrivilegedClient.kt`**:
+   - Implemented `RootDriverManager` supporting both direct `su -c` and Shizuku Root/Shell bridge (`hasShellRootAccess()` / `execRootScript()`), automatic qualifying carrier discovery (`resolveCarrierPackage()`), `applyRootDriver()`, `removeRootDriver()`, ANGLE routing, and live logcat inspection.
+   - Unified `PrivilegedClient` with `OperatingMode` (`ROOT`, `SHIZUKU`, `UNAVAILABLE`) and user `ModePreference` (`AUTO`, `ROOT`, `SHIZUKU`).
+4. **Compose UI (`CatalogScreen.kt`, `GameDetailSheet.kt`, `GamesScreen.kt`, `DiagnosticsScreen.kt`, `CommonComponents.kt`)**:
+   - Added `PrivilegeModeBanner` and `GpuSupportBadges`.
+   - Filtered `CatalogScreen` and `GameDetailSheet` by detected GPU generation by default (`164 compatible/unverified • 375 incompatible hidden` on Adreno 825) with a `"Show All (+375)"` toggle chip.
+   - Updated `DiagnosticsScreen` with live hardware metrics and Root/Shizuku mode switching.

@@ -8,6 +8,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,17 +19,30 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.kaos.kaosgfx.drivers.AdrenoGpu
+import dev.kaos.kaosgfx.privileged.ModePreference
+import dev.kaos.kaosgfx.privileged.OperatingMode
+import dev.kaos.kaosgfx.privileged.PrivilegedClient
+import dev.kaos.kaosgfx.privileged.RootStatus
 import dev.kaos.kaosgfx.privileged.ShizukuState
 import dev.kaos.kaosgfx.ui.theme.*
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DiagnosticsScreen(
+    detectedGpu: AdrenoGpu,
+    operatingMode: OperatingMode,
+    rootStatus: RootStatus,
     shizukuState: ShizukuState,
+    modePreference: ModePreference,
+    onChangeModePreference: (ModePreference) -> Unit,
+    privilegedClient: PrivilegedClient,
     modifier: Modifier = Modifier
 ) {
     var probeOutput by remember { mutableStateOf<String?>(null) }
     var isProbing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     Scaffold(
         topBar = {
@@ -36,7 +50,7 @@ fun DiagnosticsScreen(
                 title = {
                     Column {
                         Text("Hardware Diagnostics", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = PrimaryNeon)
-                        Text("Target Architecture & Environment", fontSize = 12.sp, color = TextSecondary)
+                        Text("Live GPU Architecture & Root/Shizuku Engine", fontSize = 12.sp, color = TextSecondary)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark)
@@ -52,7 +66,7 @@ fun DiagnosticsScreen(
                 .padding(horizontal = 16.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            // Hardware Specs Card
+            // Live Hardware Specs Card
             Card(
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = SurfaceDark),
@@ -62,22 +76,24 @@ fun DiagnosticsScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Memory, contentDescription = null, tint = PrimaryNeon)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Target Hardware", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = TextPrimary)
+                        Text("Detected Hardware", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = TextPrimary)
                     }
                     Spacer(modifier = Modifier.height(12.dp))
                     DiagRow("Device", "${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE})")
                     DiagRow("Hardware / Board", "${Build.HARDWARE} / ${Build.BOARD}")
-                    DiagRow("SoC", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else "Snapdragon 8 Gen 3 (SM8650)")
-                    DiagRow("GPU", "Qualcomm Adreno 750")
+                    DiagRow("SoC Model", detectedGpu.socModel.ifBlank { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else Build.HARDWARE })
+                    DiagRow("GPU Model", detectedGpu.displayName)
+                    DiagRow("GPU Generation", detectedGpu.gen.label)
+                    DiagRow("Raw KGSL / GL Renderer", detectedGpu.rawRenderer)
                     DiagRow("Android OS", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
-                    DiagRow("Kernel Page Size", "4096 bytes (4 KB standard)")
+                    DiagRow("Kernel Page Size", "${detectedGpu.pageSizeKb * 1024} bytes (${detectedGpu.pageSizeKb} KB)")
                     DiagRow("ABI Support", Build.SUPPORTED_ABIS.joinToString(", "))
                 }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Shizuku Privileged Status Card
+            // Root & Shizuku Mode Selector Card
             Card(
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = SurfaceDark),
@@ -85,11 +101,20 @@ fun DiagnosticsScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Speed, contentDescription = null, tint = PrimaryNeon)
+                        Icon(Icons.Default.Security, contentDescription = null, tint = PrimaryNeon)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Privileged Bridge", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = TextPrimary)
+                        Text("Privilege Engine & Mode", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = TextPrimary)
                     }
                     Spacer(modifier = Modifier.height(12.dp))
+                    DiagRow("Active Operating Mode", operatingMode.label)
+                    DiagRow(
+                        "Root Access",
+                        if (rootStatus.isRootAvailable) "Available (${rootStatus.providerName})" else "Not Detected / Not Granted"
+                    )
+                    if (rootStatus.isRootAvailable) {
+                        DiagRow("Active ro.gfx.driver.0", rootStatus.activeCarrierPkg.ifBlank { "Default" })
+                        DiagRow("Stock Driver Prop", rootStatus.stockDriverProp.ifBlank { "Default" })
+                    }
                     DiagRow(
                         "Shizuku Status",
                         when (shizukuState) {
@@ -98,9 +123,34 @@ fun DiagnosticsScreen(
                             ShizukuState.UNAVAILABLE -> "Unavailable (Service Stopped)"
                         }
                     )
-                    DiagRow("Installation Mode", "Direct In-Process Bootstrap (Blueprint 1)")
-                    DiagRow("Hook Engine", "ELF PLT/GOT Relocation Engine")
-                    DiagRow("Driver Isolation", "World-accessible Staging (/data/local/tmp/kaosgfx/)")
+                    DiagRow(
+                        "Driver Injection Strategy",
+                        if (operatingMode == OperatingMode.ROOT) {
+                            "Zero-Patch GraphicsEnvironment Carrier + Linker Namespace Unload"
+                        } else {
+                            "In-Process Bootstrap (TurnipAppComponentFactory + PLT Hook)"
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Preferred Operating Mode", fontSize = 12.sp, color = TextSecondary)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        ModePreference.entries.forEach { pref ->
+                            FilterChip(
+                                selected = modePreference == pref,
+                                onClick = { onChangeModePreference(pref) },
+                                label = { Text(pref.label, fontSize = 11.sp) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = PrimaryNeon,
+                                    selectedLabelColor = Color.Black
+                                )
+                            )
+                        }
+                    }
                 }
             }
 
@@ -114,7 +164,7 @@ fun DiagnosticsScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
-                        Text("Vulkan Interception Probe Output:", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = PrimaryNeon)
+                        Text("Live Subsystem Probe Output:", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = PrimaryNeon)
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = probeOutput!!,
@@ -129,17 +179,35 @@ fun DiagnosticsScreen(
 
             Button(
                 onClick = {
-                    isProbing = true
-                    probeOutput = "Physical Hardware Diagnostics:\n" +
-                            "• SoC: Snapdragon 8 Gen 3 (SM8650)\n" +
-                            "• GPU: Adreno 750 (4KB Page Size)\n" +
-                            "• Vulkan Interception: dlopen(\"libvulkan.so\") hooked via PLT/GOT\n" +
-                            "• Active Driver: Turnip Adreno (TM) 750 (Mesa 27.0.0-devel)\n" +
-                            "• Vulkan API Version: 1.4.363\n" +
-                            "• Driver ID: 18 (VK_DRIVER_ID_MESA_TURNIP)\n" +
-                            "• Status: 100% Deterministic In-Process Injection Active"
-                    isProbing = false
+                    scope.launch {
+                        isProbing = true
+                        val refreshedMode = privilegedClient.refreshCapabilities()
+                        val rStat = privilegedClient.rootStatus.value
+                        val carrier = privilegedClient.rootDriverManager.resolveCarrierPackage().getOrNull()
+                        val optedIn = if (rStat.isRootAvailable) {
+                            privilegedClient.rootDriverManager.getOptedInRootPackages()
+                        } else emptySet()
+
+                        probeOutput = buildString {
+                            appendLine("Physical Hardware & Privilege Probe:")
+                            appendLine("• SoC: ${detectedGpu.socModel} (${Build.BOARD})")
+                            appendLine("• GPU: ${detectedGpu.displayName} [raw: ${detectedGpu.rawRenderer}]")
+                            appendLine("• Kernel Page Size: ${detectedGpu.pageSizeKb} KB")
+                            appendLine("• Active Mode: ${refreshedMode.label}")
+                            if (rStat.isRootAvailable) {
+                                appendLine("• Root Provider: ${rStat.providerName}")
+                                appendLine("• Carrier Package: ${carrier?.packageName ?: "None"} (${carrier?.libArm64Dir ?: "N/A"})")
+                                appendLine("• ro.gfx.driver.0: ${rStat.activeCarrierPkg}")
+                                appendLine("• Opted-in Zero-Patch Apps: ${if (optedIn.isEmpty()) "(none)" else optedIn.joinToString(", ")}")
+                            } else {
+                                appendLine("• Root Provider: Not granted")
+                            }
+                            appendLine("• Shizuku State: ${privilegedClient.shizukuState.value}")
+                        }.trimEnd()
+                        isProbing = false
+                    }
                 },
+                enabled = !isProbing,
                 colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeon),
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier
@@ -148,7 +216,11 @@ fun DiagnosticsScreen(
             ) {
                 Icon(Icons.Default.BugReport, contentDescription = null, tint = Color.Black)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Run Vulkan Subsystem Probe", color = Color.Black, fontWeight = FontWeight.Bold)
+                Text(
+                    if (isProbing) "Probing Subsystem..." else "Run Live Hardware & Root Probe",
+                    color = Color.Black,
+                    fontWeight = FontWeight.Bold
+                )
             }
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -164,7 +236,7 @@ private fun DiagRow(label: String, value: String) {
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(text = label, fontSize = 13.sp, color = TextSecondary)
-        Text(text = value, fontSize = 13.sp, color = TextPrimary, fontWeight = FontWeight.Medium)
+        Text(text = label, fontSize = 13.sp, color = TextSecondary, modifier = Modifier.weight(0.42f))
+        Text(text = value, fontSize = 13.sp, color = TextPrimary, fontWeight = FontWeight.Medium, modifier = Modifier.weight(0.58f))
     }
 }

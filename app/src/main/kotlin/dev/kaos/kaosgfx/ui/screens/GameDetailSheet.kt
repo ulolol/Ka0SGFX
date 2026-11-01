@@ -3,7 +3,6 @@ package dev.kaos.kaosgfx.ui.screens
 import android.graphics.drawable.BitmapDrawable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -11,7 +10,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SportsEsports
@@ -31,8 +29,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import dev.kaos.kaosgfx.domain.GameApp
+import dev.kaos.kaosgfx.drivers.AdrenoGpu
+import dev.kaos.kaosgfx.drivers.CompatibilityStatus
 import dev.kaos.kaosgfx.drivers.DriverMetadata
 import dev.kaos.kaosgfx.privileged.PrivilegedClient
+import dev.kaos.kaosgfx.ui.components.GpuSupportBadges
 import dev.kaos.kaosgfx.ui.components.SimpleBadge
 import dev.kaos.kaosgfx.ui.theme.*
 import kotlinx.coroutines.launch
@@ -55,6 +56,8 @@ private fun extractJsonField(json: String, field: String): String? {
 fun GameDetailSheet(
     game: GameApp,
     availableDrivers: List<DriverMetadata>,
+    detectedGpu: AdrenoGpu,
+    isRootMode: Boolean = false,
     privilegedClient: PrivilegedClient? = null,
     onDismiss: () -> Unit,
     onPatchGame: (GameApp, DriverMetadata, Boolean) -> Unit,
@@ -90,7 +93,9 @@ fun GameDetailSheet(
             val driverId = extractJsonField(json, "driverId")
             val driverTitle = extractJsonField(json, "driverTitle")
             val enableAngle = json.contains("\"enableAngle\": true")
-            listOf(driverDir, driverName, driverId, driverTitle, if (enableAngle) "true" else "false")
+            val mode = extractJsonField(json, "mode") ?: "patch"
+            val carrier = extractJsonField(json, "carrierPackage") ?: ""
+            listOf(driverDir, driverName, driverId, driverTitle, if (enableAngle) "true" else "false", mode, carrier)
         } else null
     }
 
@@ -112,8 +117,36 @@ fun GameDetailSheet(
         }
     }
 
-    var selectedDriver by remember(availableDrivers) {
-        mutableStateOf(activeDriver ?: availableDrivers.firstOrNull { it.isInstalled } ?: availableDrivers.firstOrNull())
+    val compatibleDrivers = remember(availableDrivers, detectedGpu) {
+        availableDrivers.filter {
+            it.gpuSupport.isCompatibleWith(detectedGpu) != CompatibilityStatus.INCOMPATIBLE
+        }.sortedBy {
+            when (it.gpuSupport.isCompatibleWith(detectedGpu)) {
+                CompatibilityStatus.COMPATIBLE -> 0
+                CompatibilityStatus.TENTATIVE -> 1
+                CompatibilityStatus.UNVERIFIED -> 2
+                CompatibilityStatus.INCOMPATIBLE -> 3
+            }
+        }
+    }
+
+    val hiddenIncompatibleCount = remember(availableDrivers, detectedGpu) {
+        availableDrivers.count {
+            it.gpuSupport.isCompatibleWith(detectedGpu) == CompatibilityStatus.INCOMPATIBLE
+        }
+    }
+
+    var showIncompatibleDrivers by rememberSaveable { mutableStateOf(false) }
+
+    var selectedDriver by remember(availableDrivers, detectedGpu) {
+        mutableStateOf(
+            activeDriver
+                ?: compatibleDrivers.firstOrNull { it.isInstalled && it.gpuSupport.isCompatibleWith(detectedGpu) == CompatibilityStatus.COMPATIBLE }
+                ?: compatibleDrivers.firstOrNull { it.gpuSupport.isCompatibleWith(detectedGpu) == CompatibilityStatus.COMPATIBLE }
+                ?: compatibleDrivers.firstOrNull { it.isInstalled }
+                ?: compatibleDrivers.firstOrNull()
+                ?: availableDrivers.firstOrNull()
+        )
     }
 
     // Keep selectedDriver aligned when activeDriver is resolved asynchronously
@@ -128,9 +161,10 @@ fun GameDetailSheet(
     }
     var driverSearchQuery by rememberSaveable { mutableStateOf("") }
 
-    val filteredDrivers = remember(availableDrivers, driverSearchQuery) {
-        if (driverSearchQuery.isBlank()) availableDrivers
-        else availableDrivers.filter {
+    val filteredDrivers = remember(availableDrivers, compatibleDrivers, showIncompatibleDrivers, driverSearchQuery) {
+        val baseList = if (showIncompatibleDrivers) availableDrivers else compatibleDrivers
+        if (driverSearchQuery.isBlank()) baseList
+        else baseList.filter {
             it.name.contains(driverSearchQuery, ignoreCase = true) ||
                     it.version.contains(driverSearchQuery, ignoreCase = true) ||
                     it.author.contains(driverSearchQuery, ignoreCase = true) ||
@@ -144,9 +178,9 @@ fun GameDetailSheet(
     var isLogLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    // Poll live PID if patched
-    LaunchedEffect(game.packageName, game.isPatched) {
-        if (game.isPatched && privilegedClient != null) {
+    // Poll live PID if custom driver is active
+    LaunchedEffect(game.packageName, game.hasCustomDriver) {
+        if (game.hasCustomDriver && privilegedClient != null) {
             val res = privilegedClient.getPackageProcessId(game.packageName)
             livePid = res.getOrNull()
         }
@@ -224,7 +258,7 @@ fun GameDetailSheet(
             Spacer(modifier = Modifier.height(16.dp))
 
             // Denylist Warning
-            if (game.isDenylisted) {
+            if (game.isDenylisted && !isRootMode) {
                 Card(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = ErrorRed.copy(alpha = 0.15f)),
@@ -252,8 +286,9 @@ fun GameDetailSheet(
                     }
                 }
             } else {
-                // Live Pipeline Status Card (if Patched)
-                if (game.isPatched) {
+                // Live Pipeline Status Card (if Patched or Root Active)
+                if (game.hasCustomDriver) {
+                    val activeCarrier = activeConfig?.getOrNull(6).orEmpty()
                     Card(
                         shape = RoundedCornerShape(12.dp),
                         colors = CardDefaults.cardColors(containerColor = SurfaceVariantDark),
@@ -267,7 +302,7 @@ fun GameDetailSheet(
                                 Icon(Icons.Default.CheckCircle, contentDescription = null, tint = PrimaryNeon, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "Custom Driver Pipeline Active",
+                                    text = if (game.isRootActive) "Root Zero-Patch Pipeline Active" else "Custom Driver Pipeline Active",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 14.sp,
                                     color = PrimaryNeon
@@ -282,7 +317,11 @@ fun GameDetailSheet(
 
                             Spacer(modifier = Modifier.height(10.dp))
                             Text(
-                                text = "Bootstrap: TurnipAppComponentFactory (Injected)\nEngine: libadrenotools + In-process PLT Interceptor",
+                                text = if (game.isRootActive) {
+                                    "Bootstrap: GraphicsEnvironment Carrier (${activeCarrier.ifBlank { "ro.gfx.driver.0" }})\nEngine: Native Linker Namespace Unload + Custom Vulkan HAL (Zero APK Patch)"
+                                } else {
+                                    "Bootstrap: TurnipAppComponentFactory (Injected)\nEngine: libadrenotools + In-process PLT Interceptor"
+                                },
                                 fontSize = 12.sp,
                                 color = TextSecondary,
                                 lineHeight = 16.sp
@@ -332,7 +371,14 @@ fun GameDetailSheet(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Action Buttons: Update / Patch & Restore (Placed ABOVE the driver list for immediate access!)
+                // Action Buttons: Apply/Update & Restore
+                val buttonLabel = when {
+                    game.hasCustomDriver && isRootMode -> "Update Root Driver (Zero APK Patch)"
+                    game.hasCustomDriver -> "Update Custom Driver"
+                    isRootMode -> "Apply Driver (Root — Zero APK Patch)"
+                    else -> "Patch & Enable Custom Driver"
+                }
+
                 Button(
                     onClick = {
                         val drv = selectedDriver
@@ -340,7 +386,7 @@ fun GameDetailSheet(
                             onPatchGame(game, drv, enableAngle)
                         }
                     },
-                    enabled = selectedDriver != null && !game.isDenylisted,
+                    enabled = selectedDriver != null && (!game.isDenylisted || isRootMode),
                     colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeon),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
@@ -348,14 +394,14 @@ fun GameDetailSheet(
                         .height(50.dp)
                 ) {
                     Text(
-                        if (game.isPatched) "Update Custom Driver" else "Patch & Enable Custom Driver",
+                        buttonLabel,
                         color = Color.Black,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp
                     )
                 }
 
-                if (game.isPatched) {
+                if (game.hasCustomDriver) {
                     Spacer(modifier = Modifier.height(10.dp))
                     OutlinedButton(
                         onClick = { onUnpatchGame(game) },
@@ -385,7 +431,7 @@ fun GameDetailSheet(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = "Active in Game: ${activeDriver.name}",
+                                    text = "Active in App: ${activeDriver.name}",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.sp,
                                     color = PrimaryNeon,
@@ -418,7 +464,7 @@ fun GameDetailSheet(
                                     )
                                 }
                                 Text(
-                                    text = "Tap 'Update Custom Driver' above to apply this driver to the game.",
+                                    text = "Tap '$buttonLabel' above to switch to this driver.",
                                     fontSize = 11.sp,
                                     color = PrimaryBlue
                                 )
@@ -452,18 +498,41 @@ fun GameDetailSheet(
                 }
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Driver Search Bar
+                // Driver Filter Header + Toggle
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = "Available Drivers (${filteredDrivers.size})",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 15.sp,
-                        color = TextPrimary
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Available Drivers (${filteredDrivers.size})",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Hardware filter: ${detectedGpu.displayName}",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                    if (hiddenIncompatibleCount > 0) {
+                        FilterChip(
+                            selected = showIncompatibleDrivers,
+                            onClick = { showIncompatibleDrivers = !showIncompatibleDrivers },
+                            label = {
+                                Text(
+                                    text = if (showIncompatibleDrivers) "Hide Incompatible" else "Show All (+$hiddenIncompatibleCount)",
+                                    fontSize = 11.sp
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = WarningOrange.copy(alpha = 0.25f),
+                                selectedLabelColor = WarningOrange
+                            )
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -497,7 +566,7 @@ fun GameDetailSheet(
 
                 if (filteredDrivers.isEmpty()) {
                     Text(
-                        text = if (driverSearchQuery.isNotBlank()) "No drivers match '$driverSearchQuery'." else "No drivers found in catalog. Visit the Catalog tab to load releases.",
+                        text = if (driverSearchQuery.isNotBlank()) "No drivers match '$driverSearchQuery'." else "No compatible drivers found. Toggle 'Show All' or visit the Catalog tab.",
                         fontSize = 13.sp,
                         color = TextSecondary,
                         modifier = Modifier.padding(vertical = 12.dp)
@@ -546,6 +615,8 @@ fun GameDetailSheet(
                                         }
                                     }
                                     Text("Author: ${driver.author} • Target: ${driver.libraryName}", fontSize = 11.sp, color = TextSecondary)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    GpuSupportBadges(driver = driver, detectedGpu = detectedGpu)
                                 }
                             }
                         }

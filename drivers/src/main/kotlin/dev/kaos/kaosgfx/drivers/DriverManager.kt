@@ -30,31 +30,50 @@ class DriverManager(private val context: Context) {
             } ?: return@withContext Result.failure(IllegalStateException("Cannot open input stream for URI: $uri"))
 
             var libName = "libvulkan_freedreno.so"
+            var metaDesc = ""
+            var metaName = fileName
+            var metaVersion = "custom"
             try {
                 ZipFile(destFile).use { zip ->
                     val metaEntry = zip.getEntry("meta.json")
                     if (metaEntry != null) {
                         val text = zip.getInputStream(metaEntry).bufferedReader().readText()
-                        val element = Json.parseToJsonElement(text)
-                        val name = (element as? kotlinx.serialization.json.JsonObject)?.get("libraryName")
-                        if (name != null) {
-                            libName = name.toString().replace("\"", "")
-                        }
+                        val obj = Json.parseToJsonElement(text) as? kotlinx.serialization.json.JsonObject
+                        obj?.get("libraryName")?.toString()?.replace("\"", "")?.takeIf { it.isNotBlank() }?.let { libName = it }
+                        obj?.get("description")?.toString()?.replace("\"", "")?.takeIf { it.isNotBlank() }?.let { metaDesc = it }
+                        obj?.get("name")?.toString()?.replace("\"", "")?.takeIf { it.isNotBlank() }?.let { metaName = it }
+                        obj?.get("driverVersion")?.toString()?.replace("\"", "")?.takeIf { it.isNotBlank() }?.let { metaVersion = it }
                     }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Zip inspection warning: ${e.message}")
             }
 
+            val gpuSupport = GpuSupportParser.parse(
+                assetName = fileName,
+                releaseName = metaName,
+                tagName = metaVersion,
+                bodyText = metaDesc
+            )
+            val driverType = GpuSupportParser.inferDriverType(
+                assetName = fileName,
+                releaseName = metaName,
+                bodyText = metaDesc,
+                libraryName = libName
+            )
+
             val meta = DriverMetadata(
                 id = fileName.substringBeforeLast("."),
-                name = fileName,
-                version = "custom",
+                name = metaName,
+                version = metaVersion,
                 author = "User Imported",
+                description = metaDesc,
                 downloadUrl = "",
                 fileName = fileName,
                 fileSize = destFile.length(),
                 libraryName = libName,
+                gpuSupport = gpuSupport,
+                driverType = driverType,
                 isInstalled = true,
                 localPath = destFile.absolutePath
             )
@@ -64,7 +83,13 @@ class DriverManager(private val context: Context) {
         }
     }
 
-    fun buildConfigJson(targetPackage: String, driver: DriverMetadata, enableAngle: Boolean = false): String {
+    fun buildConfigJson(
+        targetPackage: String,
+        driver: DriverMetadata,
+        enableAngle: Boolean = false,
+        mode: String = "patch",
+        carrierPackage: String = ""
+    ): String {
         var resolvedLibName = driver.libraryName
 
         // Inspect meta.json from local zip file if present
@@ -90,12 +115,14 @@ class DriverManager(private val context: Context) {
         }
 
         val config = DriverConfig(
-            driverDir = "/data/user/0/$targetPackage/files/turnip/${driver.id}",
+            driverDir = if (mode == "root") "/data/adb/kaosgfx/drivers/$targetPackage" else "/data/user/0/$targetPackage/files/turnip/${driver.id}",
             driverName = resolvedLibName,
             hookLibDir = "",
             enableAngle = enableAngle,
             driverId = driver.id,
-            driverTitle = driver.name
+            driverTitle = driver.name,
+            mode = mode,
+            carrierPackage = carrierPackage
         )
         return json.encodeToString(config)
     }

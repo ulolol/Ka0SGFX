@@ -51,7 +51,33 @@ class DriverCatalogRepository(private val context: Context) {
         if (file.exists() && file.canRead()) {
             try {
                 val text = file.readText()
-                return json.decodeFromString<List<DriverMetadata>>(text).toMutableList()
+                val rawList = json.decodeFromString<List<DriverMetadata>>(text)
+                // Re-enrich any legacy cached entries that predate GpuSupport metadata
+                val siblingGroups = rawList.groupBy { "${it.sourceRepo}_${it.version}" }
+                return rawList.map { item ->
+                    if (item.gpuSupport.confidence == SupportConfidence.UNVERIFIED) {
+                        val siblings = siblingGroups["${item.sourceRepo}_${item.version}"]
+                            ?.map { it.fileName }
+                            .orEmpty()
+                        val parsedSupport = GpuSupportParser.parse(
+                            assetName = item.fileName,
+                            releaseName = item.name,
+                            tagName = item.version,
+                            bodyText = item.description,
+                            sourceRepo = item.sourceRepo,
+                            siblingAssetNames = siblings
+                        )
+                        val parsedType = GpuSupportParser.inferDriverType(
+                            assetName = item.fileName,
+                            releaseName = item.name,
+                            bodyText = item.description,
+                            libraryName = item.libraryName
+                        )
+                        item.copy(gpuSupport = parsedSupport, driverType = parsedType)
+                    } else {
+                        item
+                    }
+                }.toMutableList()
             } catch (e: Exception) {
                 Log.w(TAG, "Failed reading catalog cache: ${e.message}")
             }
@@ -162,6 +188,11 @@ class DriverCatalogRepository(private val context: Context) {
             val publishedAt = releaseObj["published_at"]?.jsonPrimitive?.contentOrNull ?: ""
 
             val assetsArray = releaseObj["assets"]?.jsonArray ?: continue
+            val siblingAssetNames = assetsArray.mapNotNull { el ->
+                el.jsonObject["name"]?.jsonPrimitive?.contentOrNull?.takeIf {
+                    it.endsWith(".zip", ignoreCase = true)
+                }
+            }
             for (assetElement in assetsArray) {
                 val assetObj = assetElement.jsonObject
                 val fileName = assetObj["name"]?.jsonPrimitive?.content ?: continue
@@ -181,19 +212,36 @@ class DriverCatalogRepository(private val context: Context) {
                     "libvulkan_freedreno.so"
                 }
 
+                val gpuSupport = GpuSupportParser.parse(
+                    assetName = fileName,
+                    releaseName = releaseName,
+                    tagName = tagName,
+                    bodyText = bodyText,
+                    sourceRepo = "${source.repoOwner}/${source.repoName}",
+                    siblingAssetNames = siblingAssetNames
+                )
+                val driverType = GpuSupportParser.inferDriverType(
+                    assetName = fileName,
+                    releaseName = releaseName,
+                    bodyText = bodyText,
+                    libraryName = inferredLibName
+                )
+
                 drivers.add(
                     DriverMetadata(
                         id = id,
                         name = "$releaseName - $fileName",
                         version = tagName,
                         author = source.repoOwner,
-                        description = bodyText.take(200),
+                        description = bodyText.take(240),
                         downloadUrl = downloadUrl,
                         fileName = fileName,
                         fileSize = size,
                         libraryName = inferredLibName,
                         sourceRepo = "${source.repoOwner}/${source.repoName}",
-                        releaseDate = publishedAt
+                        releaseDate = publishedAt,
+                        gpuSupport = gpuSupport,
+                        driverType = driverType
                     )
                 )
             }
@@ -226,19 +274,54 @@ class DriverCatalogRepository(private val context: Context) {
 
     fun getInstalledDrivers(): List<DriverMetadata> {
         val list = mutableListOf<DriverMetadata>()
-        val files = storageDir.listFiles { _, name -> name.endsWith(".zip") } ?: return emptyList()
+        val files = storageDir.listFiles { _, name -> name.endsWith(".zip", ignoreCase = true) } ?: return emptyList()
         for (file in files) {
             val id = file.nameWithoutExtension
+            var metaName = file.name
+            var metaDesc = ""
+            var metaVersion = "local"
+            var metaAuthor = "Custom / Installed"
+            var metaLib = "libvulkan_freedreno.so"
+            try {
+                java.util.zip.ZipFile(file).use { zip ->
+                    val entry = zip.getEntry("meta.json")
+                    if (entry != null) {
+                        val metaStr = zip.getInputStream(entry).bufferedReader().readText()
+                        val obj = json.parseToJsonElement(metaStr).jsonObject
+                        obj["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { metaName = it }
+                        obj["description"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { metaDesc = it }
+                        obj["driverVersion"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { metaVersion = it }
+                        obj["author"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { metaAuthor = it }
+                        obj["libraryName"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { metaLib = it }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            val support = GpuSupportParser.parse(
+                assetName = file.name,
+                releaseName = metaName,
+                tagName = metaVersion,
+                bodyText = metaDesc
+            )
+            val driverType = GpuSupportParser.inferDriverType(
+                assetName = file.name,
+                releaseName = metaName,
+                bodyText = metaDesc,
+                libraryName = metaLib
+            )
             list.add(
                 DriverMetadata(
                     id = id,
-                    name = file.name,
-                    version = "local",
-                    author = "Custom / Installed",
+                    name = metaName,
+                    version = metaVersion,
+                    author = metaAuthor,
+                    description = metaDesc,
                     downloadUrl = "",
                     fileName = file.name,
                     fileSize = file.length(),
-                    libraryName = "libvulkan_freedreno.so",
+                    libraryName = metaLib,
+                    gpuSupport = support,
+                    driverType = driverType,
                     isInstalled = true,
                     localPath = file.absolutePath
                 )
@@ -250,6 +333,25 @@ class DriverCatalogRepository(private val context: Context) {
     private fun getBuiltinCatalog(): List<DriverMetadata> {
         return listOf(
             DriverMetadata(
+                id = "stevenmxz_v27.0.0-R1_Turnip_Gen8_V38",
+                name = "Mesa Turnip driver v27.0.0-R1 (Gen 8 V38) - Turnip_Gen8_V38.zip",
+                version = "v27.0.0-R1",
+                author = "StevenMXZ",
+                description = "Turnip driver built from latest mesa commit for A8xx GPUs (a840, a830, a829, a825, 810).",
+                downloadUrl = "https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases/download/v27.0.0-R1/Turnip_Gen8_V38.zip",
+                fileName = "Turnip_Gen8_V38.zip",
+                fileSize = 2784405L,
+                libraryName = "libvulkan_freedreno.so",
+                sourceRepo = "StevenMXZ/Adreno-Tools-Drivers",
+                gpuSupport = GpuSupport(
+                    supportedGens = setOf(AdrenoGen.A8XX),
+                    specificModels = setOf(810, 825, 829, 830, 840),
+                    confidence = SupportConfidence.EXPLICIT,
+                    note = "Adreno 8xx (Gen 8) Turnip build"
+                ),
+                driverType = DriverType.TURNIP
+            ),
+            DriverMetadata(
                 id = "banners_turnip_25.0.0_r12",
                 name = "Turnip Mesa 25.0.0 (Banners R12)",
                 version = "v25.0.0-r12",
@@ -259,7 +361,13 @@ class DriverCatalogRepository(private val context: Context) {
                 fileName = "turnip_25.0.0_r12.zip",
                 fileSize = 14500000L,
                 libraryName = "libvulkan_freedreno.so",
-                sourceRepo = "The412Banner/Banners-Turnip"
+                sourceRepo = "The412Banner/Banners-Turnip",
+                gpuSupport = GpuSupport(
+                    supportedGens = setOf(AdrenoGen.A6XX, AdrenoGen.A7XX),
+                    confidence = SupportConfidence.EXPLICIT,
+                    note = "Adreno 6xx & 7xx build"
+                ),
+                driverType = DriverType.TURNIP
             ),
             DriverMetadata(
                 id = "k11mch1_turnip_v24.3.0",
@@ -271,7 +379,13 @@ class DriverCatalogRepository(private val context: Context) {
                 fileName = "turnip-v24.3.0.zip",
                 fileSize = 13800000L,
                 libraryName = "libvulkan_freedreno.so",
-                sourceRepo = "K11MCH1/AdrenoToolsDrivers"
+                sourceRepo = "K11MCH1/AdrenoToolsDrivers",
+                gpuSupport = GpuSupport(
+                    supportedGens = setOf(AdrenoGen.A6XX, AdrenoGen.A7XX),
+                    confidence = SupportConfidence.TENTATIVE,
+                    note = "Pre-Gen8 Turnip build (A6xx/A7xx)"
+                ),
+                driverType = DriverType.TURNIP
             ),
             DriverMetadata(
                 id = "whitebelyash_turnip_mesa_24.2",
@@ -283,43 +397,67 @@ class DriverCatalogRepository(private val context: Context) {
                 fileName = "turnip-mesa-24.2.0.zip",
                 fileSize = 14200000L,
                 libraryName = "libvulkan_freedreno.so",
-                sourceRepo = "whitebelyash/AdrenoToolsDrivers"
+                sourceRepo = "whitebelyash/AdrenoToolsDrivers",
+                gpuSupport = GpuSupport(
+                    supportedGens = setOf(AdrenoGen.A7XX),
+                    confidence = SupportConfidence.EXPLICIT,
+                    note = "Adreno 7xx build"
+                ),
+                driverType = DriverType.TURNIP
             ),
             DriverMetadata(
                 id = "mrpurple_vturnip_mrpurple_T30-toasted.adpkg_turnip_mrpurple_T30-toasted.adpkg",
                 name = "turnip_mrpurple_T30-toasted.adpkg - turnip_mrpurple_T30-toasted.adpkg.zip",
                 version = "vturnip_mrpurple_T30-toasted.adpkg",
                 author = "MrPurple666",
-                description = "Turnip Mesa T30 driver with optimized Adreno 750 / 8 Gen 3 pipeline support.",
+                description = "Unified: A6XX, A7XX, A8XX. Turnip Mesa T30 driver with optimized pipeline support.",
                 downloadUrl = "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T30-toasted.adpkg/turnip_mrpurple_T30-toasted.adpkg.zip",
                 fileName = "turnip_mrpurple_T30-toasted.adpkg.zip",
                 fileSize = 3713730L,
                 libraryName = "libvulkan_freedreno.so",
-                sourceRepo = "MrPurple666/purple-turnip"
+                sourceRepo = "MrPurple666/purple-turnip",
+                gpuSupport = GpuSupport(
+                    supportedGens = setOf(AdrenoGen.A6XX, AdrenoGen.A7XX, AdrenoGen.A8XX),
+                    confidence = SupportConfidence.EXPLICIT,
+                    note = "Unified A6xx, A7xx, A8xx build"
+                ),
+                driverType = DriverType.TURNIP
             ),
             DriverMetadata(
                 id = "mrpurple_vturnip_mrpurple_T29-toasted.adpkg_turnip_mrpurple_T29-toasted.adpkg",
                 name = "turnip_mrpurple_T29-toasted.adpkg - turnip_mrpurple_T29-toasted.adpkg.zip",
                 version = "vturnip_mrpurple_T29-toasted.adpkg",
                 author = "MrPurple666",
-                description = "Turnip Mesa T29 driver with optimized Adreno 750 / 8 Gen 3 pipeline support.",
+                description = "Unified: A6XX, A7XX, A8XX. Turnip Mesa T29 driver with optimized pipeline support.",
                 downloadUrl = "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T29-toasted.adpkg/turnip_mrpurple_T29-toasted.adpkg.zip",
                 fileName = "turnip_mrpurple_T29-toasted.adpkg.zip",
                 fileSize = 3680000L,
                 libraryName = "libvulkan_freedreno.so",
-                sourceRepo = "MrPurple666/purple-turnip"
+                sourceRepo = "MrPurple666/purple-turnip",
+                gpuSupport = GpuSupport(
+                    supportedGens = setOf(AdrenoGen.A6XX, AdrenoGen.A7XX, AdrenoGen.A8XX),
+                    confidence = SupportConfidence.EXPLICIT,
+                    note = "Unified A6xx, A7xx, A8xx build"
+                ),
+                driverType = DriverType.TURNIP
             ),
             DriverMetadata(
                 id = "mrpurple_vturnip_mrpurple_T28-toasted.adpkg_turnip_mrpurple_T28-toasted.adpkg",
                 name = "turnip_mrpurple_T28-toasted.adpkg - turnip_mrpurple_T28-toasted.adpkg.zip",
                 version = "vturnip_mrpurple_T28-toasted.adpkg",
                 author = "MrPurple666",
-                description = "Turnip Mesa T28 driver with optimized Adreno 750 / 8 Gen 3 pipeline support.",
+                description = "Unified: A6XX, A7XX, A8XX. Turnip Mesa T28 driver with optimized pipeline support.",
                 downloadUrl = "https://github.com/MrPurple666/purple-turnip/releases/download/vturnip_mrpurple_T28-toasted.adpkg/turnip_mrpurple_T28-toasted.adpkg.zip",
                 fileName = "turnip_mrpurple_T28-toasted.adpkg.zip",
                 fileSize = 3650000L,
                 libraryName = "libvulkan_freedreno.so",
-                sourceRepo = "MrPurple666/purple-turnip"
+                sourceRepo = "MrPurple666/purple-turnip",
+                gpuSupport = GpuSupport(
+                    supportedGens = setOf(AdrenoGen.A6XX, AdrenoGen.A7XX, AdrenoGen.A8XX),
+                    confidence = SupportConfidence.EXPLICIT,
+                    note = "Unified A6xx, A7xx, A8xx build"
+                ),
+                driverType = DriverType.TURNIP
             ),
             DriverMetadata(
                 id = "k11mch1_v840_Qualcomm_840_adpkg",
@@ -331,7 +469,13 @@ class DriverCatalogRepository(private val context: Context) {
                 fileName = "Qualcomm_840_adpkg.zip",
                 fileSize = 17385120L,
                 libraryName = "vkgsl.so",
-                sourceRepo = "K11MCH1/AdrenoToolsDrivers"
+                sourceRepo = "K11MCH1/AdrenoToolsDrivers",
+                gpuSupport = GpuSupport(
+                    supportedGens = setOf(AdrenoGen.A7XX, AdrenoGen.A8XX),
+                    confidence = SupportConfidence.TENTATIVE,
+                    note = "Qualcomm v840 blob"
+                ),
+                driverType = DriverType.QUALCOMM_BLOB
             ),
             DriverMetadata(
                 id = "k11mch1_v837_Qualcomm_837_adpkg",
@@ -343,7 +487,13 @@ class DriverCatalogRepository(private val context: Context) {
                 fileName = "Qualcomm_837_adpkg.zip",
                 fileSize = 17200000L,
                 libraryName = "vkgsl.so",
-                sourceRepo = "K11MCH1/AdrenoToolsDrivers"
+                sourceRepo = "K11MCH1/AdrenoToolsDrivers",
+                gpuSupport = GpuSupport(
+                    supportedGens = setOf(AdrenoGen.A7XX, AdrenoGen.A8XX),
+                    confidence = SupportConfidence.TENTATIVE,
+                    note = "Qualcomm v837 blob"
+                ),
+                driverType = DriverType.QUALCOMM_BLOB
             )
         )
     }

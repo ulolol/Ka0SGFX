@@ -10,16 +10,28 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 import java.io.File
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 enum class ShizukuState {
     UNAVAILABLE,
     PERMISSION_REQUIRED,
     READY
+}
+
+enum class OperatingMode(val label: String) {
+    ROOT("Root (Zero APK Patch)"),
+    SHIZUKU("Shizuku (APK Patch)"),
+    UNAVAILABLE("Privilege Required")
+}
+
+enum class ModePreference(val label: String) {
+    AUTO("Auto (Prefer Root)"),
+    ROOT("Root Mode"),
+    SHIZUKU("Shizuku Mode")
 }
 
 enum class AngleDriverType(val value: String) {
@@ -34,10 +46,31 @@ class PrivilegedClient(private val context: Context) {
         private const val TAG = "KaosGFX-PrivClient"
         private const val SHIZUKU_REQUEST_CODE = 4242
         private const val SERVICE_SUFFIX = "privileged_service"
+        private const val PREFS_NAME = "kaosgfx_priv_prefs"
+        private const val KEY_MODE_PREF = "mode_preference"
     }
+
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private val _shizukuState = MutableStateFlow(ShizukuState.UNAVAILABLE)
     val shizukuState: StateFlow<ShizukuState> = _shizukuState
+
+    private val _rootStatus = MutableStateFlow(RootStatus(isRootAvailable = false))
+    val rootStatus: StateFlow<RootStatus> = _rootStatus
+
+    private val _modePreference = MutableStateFlow(loadModePreference())
+    val modePreference: StateFlow<ModePreference> = _modePreference
+
+    private val _operatingMode = MutableStateFlow(OperatingMode.UNAVAILABLE)
+    val operatingMode: StateFlow<OperatingMode> = _operatingMode
+
+    val rootDriverManager = RootDriverManager(context) {
+        if (checkStatus() == ShizukuState.READY) {
+            getService().getOrNull()
+        } else {
+            null
+        }
+    }
 
     private var privilegedService: IPrivilegedService? = null
     private var connectionDeferred: CompletableDeferred<IPrivilegedService>? = null
@@ -65,6 +98,47 @@ class PrivilegedClient(private val context: Context) {
         }
     }
 
+    private fun loadModePreference(): ModePreference {
+        val raw = prefs.getString(KEY_MODE_PREF, ModePreference.AUTO.name) ?: ModePreference.AUTO.name
+        return try {
+            ModePreference.valueOf(raw)
+        } catch (_: Exception) {
+            ModePreference.AUTO
+        }
+    }
+
+    fun setModePreference(preference: ModePreference) {
+        prefs.edit().putString(KEY_MODE_PREF, preference.name).apply()
+        _modePreference.value = preference
+        recomputeOperatingMode()
+    }
+
+    fun isRootModeActive(): Boolean = _operatingMode.value == OperatingMode.ROOT
+
+    suspend fun refreshCapabilities(): OperatingMode = withContext(Dispatchers.IO) {
+        checkStatus()
+        val rStatus = rootDriverManager.detectRootStatus()
+        _rootStatus.value = rStatus
+        recomputeOperatingMode()
+        _operatingMode.value
+    }
+
+    private fun recomputeOperatingMode() {
+        val hasRoot = _rootStatus.value.isRootAvailable
+        val hasShizuku = _shizukuState.value == ShizukuState.READY
+        val pref = _modePreference.value
+
+        _operatingMode.value = when (pref) {
+            ModePreference.ROOT -> if (hasRoot) OperatingMode.ROOT else if (hasShizuku) OperatingMode.SHIZUKU else OperatingMode.UNAVAILABLE
+            ModePreference.SHIZUKU -> if (hasShizuku) OperatingMode.SHIZUKU else if (hasRoot) OperatingMode.ROOT else OperatingMode.UNAVAILABLE
+            ModePreference.AUTO -> when {
+                hasRoot -> OperatingMode.ROOT
+                hasShizuku -> OperatingMode.SHIZUKU
+                else -> OperatingMode.UNAVAILABLE
+            }
+        }
+    }
+
     fun checkStatus(): ShizukuState {
         val state = try {
             if (!Shizuku.pingBinder()) {
@@ -79,6 +153,7 @@ class PrivilegedClient(private val context: Context) {
             ShizukuState.UNAVAILABLE
         }
         _shizukuState.value = state
+        recomputeOperatingMode()
         return state
     }
 
@@ -94,6 +169,7 @@ class PrivilegedClient(private val context: Context) {
                     Shizuku.removeRequestPermissionResultListener(this)
                     val granted = grantResult == PackageManager.PERMISSION_GRANTED
                     _shizukuState.value = if (granted) ShizukuState.READY else ShizukuState.PERMISSION_REQUIRED
+                    recomputeOperatingMode()
                     continuation.resume(granted)
                 }
             }
@@ -151,6 +227,10 @@ class PrivilegedClient(private val context: Context) {
     }
 
     suspend fun forceStop(packageName: String): Result<Unit> = withContext(Dispatchers.IO) {
+        if (isRootModeActive()) {
+            val res = rootDriverManager.execRoot("am force-stop '$packageName'")
+            return@withContext if (res.isSuccess) Result.success(Unit) else Result.failure(RuntimeException(res.combined))
+        }
         val service = getService().getOrElse { return@withContext Result.failure(it) }
         try {
             service.forceStop(packageName)
@@ -161,9 +241,11 @@ class PrivilegedClient(private val context: Context) {
     }
 
     suspend fun setAngleDriver(packageName: String, driverType: AngleDriverType): Result<Unit> = withContext(Dispatchers.IO) {
+        if (isRootModeActive()) {
+            return@withContext rootDriverManager.updateAngleSettingRoot(packageName, driverType)
+        }
         val service = getService().getOrElse { return@withContext Result.failure(it) }
         try {
-            // angle_gl_driver_selection_pkgs and angle_gl_driver_selection_values are comma-separated
             val currentPkgs = service.getGlobalSetting("angle_gl_driver_selection_pkgs")
                 .split(",")
                 .filter { it.isNotBlank() }
@@ -209,6 +291,9 @@ class PrivilegedClient(private val context: Context) {
     }
 
     suspend fun getDriverConfig(packageName: String): Result<String> = withContext(Dispatchers.IO) {
+        if (isRootModeActive()) {
+            return@withContext Result.success(rootDriverManager.getDriverConfigRoot(packageName))
+        }
         val service = getService().getOrElse { return@withContext Result.failure(it) }
         try {
             val config = service.getDriverConfig(packageName)
@@ -219,6 +304,9 @@ class PrivilegedClient(private val context: Context) {
     }
 
     suspend fun getPipelineLogs(packageName: String, maxLines: Int = 150): Result<String> = withContext(Dispatchers.IO) {
+        if (isRootModeActive()) {
+            return@withContext Result.success(rootDriverManager.getPipelineLogsRoot(packageName, maxLines))
+        }
         val service = getService().getOrElse { return@withContext Result.failure(it) }
         try {
             val logs = service.getPipelineLogs(packageName, maxLines)
@@ -229,6 +317,9 @@ class PrivilegedClient(private val context: Context) {
     }
 
     suspend fun getPackageProcessId(packageName: String): Result<Int> = withContext(Dispatchers.IO) {
+        if (isRootModeActive()) {
+            return@withContext Result.success(rootDriverManager.getPackageProcessIdRoot(packageName))
+        }
         val service = getService().getOrElse { return@withContext Result.failure(it) }
         try {
             val pid = service.getPackageProcessId(packageName)

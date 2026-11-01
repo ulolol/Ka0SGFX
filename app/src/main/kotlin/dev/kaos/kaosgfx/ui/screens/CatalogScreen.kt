@@ -12,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -22,8 +23,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.kaos.kaosgfx.drivers.AdrenoGpu
+import dev.kaos.kaosgfx.drivers.CompatibilityStatus
 import dev.kaos.kaosgfx.drivers.DriverMetadata
 import dev.kaos.kaosgfx.drivers.DriverSource
+import dev.kaos.kaosgfx.ui.components.GpuSupportBadges
 import dev.kaos.kaosgfx.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -31,6 +35,7 @@ import dev.kaos.kaosgfx.ui.theme.*
 fun CatalogScreen(
     drivers: List<DriverMetadata>,
     sources: List<DriverSource>,
+    detectedGpu: AdrenoGpu,
     isLoading: Boolean,
     downloadingMap: Map<String, Int>, // driverId -> percent
     onRefresh: () -> Unit,
@@ -39,6 +44,7 @@ fun CatalogScreen(
     modifier: Modifier = Modifier
 ) {
     var selectedSourceId by rememberSaveable { mutableStateOf<String?>("all") }
+    var showIncompatible by rememberSaveable { mutableStateOf(false) }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -48,9 +54,35 @@ fun CatalogScreen(
         }
     }
 
-    val filteredDrivers = remember(drivers, selectedSourceId) {
+    val sourceDrivers = remember(drivers, selectedSourceId) {
         if (selectedSourceId == null || selectedSourceId == "all") drivers
         else drivers.filter { it.id.startsWith(selectedSourceId!!) }
+    }
+
+    val hiddenIncompatibleCount = remember(sourceDrivers, detectedGpu) {
+        sourceDrivers.count {
+            it.gpuSupport.isCompatibleWith(detectedGpu) == CompatibilityStatus.INCOMPATIBLE
+        }
+    }
+
+    val filteredDrivers = remember(sourceDrivers, detectedGpu, showIncompatible) {
+        val visible = if (showIncompatible) {
+            sourceDrivers
+        } else {
+            sourceDrivers.filter {
+                it.gpuSupport.isCompatibleWith(detectedGpu) != CompatibilityStatus.INCOMPATIBLE
+            }
+        }
+        visible.sortedWith(
+            compareBy<DriverMetadata> {
+                when (it.gpuSupport.isCompatibleWith(detectedGpu)) {
+                    CompatibilityStatus.COMPATIBLE -> 0
+                    CompatibilityStatus.TENTATIVE -> 1
+                    CompatibilityStatus.UNVERIFIED -> 2
+                    CompatibilityStatus.INCOMPATIBLE -> 3
+                }
+            }.thenByDescending { it.isInstalled }
+        )
     }
 
     Scaffold(
@@ -59,7 +91,7 @@ fun CatalogScreen(
                 title = {
                     Column {
                         Text("Driver Catalog", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = PrimaryNeon)
-                        Text("Mesa Turnip & Adreno Drivers", fontSize = 12.sp, color = TextSecondary)
+                        Text("Mesa Turnip & Adreno Drivers • Filtered for ${detectedGpu.gen.label}", fontSize = 12.sp, color = TextSecondary)
                     }
                 },
                 actions = {
@@ -88,7 +120,62 @@ fun CatalogScreen(
                 .fillMaxSize()
                 .padding(horizontal = 16.dp)
         ) {
-            // Filter Chips
+            // Hardware GPU Filter Bar
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Memory,
+                        contentDescription = null,
+                        tint = PrimaryNeon,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = detectedGpu.displayName,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = if (showIncompatible) {
+                                "Showing all ${filteredDrivers.size} drivers (including incompatible)"
+                            } else {
+                                "${filteredDrivers.size} compatible/unverified • $hiddenIncompatibleCount incompatible hidden"
+                            },
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                    FilterChip(
+                        selected = showIncompatible,
+                        onClick = { showIncompatible = !showIncompatible },
+                        label = {
+                            Text(
+                                text = if (showIncompatible) "Hide Incompatible" else "Show All (+$hiddenIncompatibleCount)",
+                                fontSize = 11.sp
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = WarningOrange.copy(alpha = 0.25f),
+                            selectedLabelColor = WarningOrange
+                        )
+                    )
+                }
+            }
+
+            // Source Filter Chips
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.padding(bottom = 12.dp)
@@ -123,7 +210,23 @@ fun CatalogScreen(
                 }
             } else if (filteredDrivers.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No drivers found for this source.", color = TextSecondary)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = if (hiddenIncompatibleCount > 0 && !showIncompatible) {
+                                "No ${detectedGpu.gen.label}-compatible drivers in this source ($hiddenIncompatibleCount incompatible hidden)."
+                            } else {
+                                "No drivers found for this source."
+                            },
+                            color = TextSecondary,
+                            fontSize = 13.sp
+                        )
+                        if (hiddenIncompatibleCount > 0 && !showIncompatible) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(onClick = { showIncompatible = true }) {
+                                Text("Show Incompatible Drivers ($hiddenIncompatibleCount)", color = WarningOrange)
+                            }
+                        }
+                    }
                 }
             } else {
                 LazyColumn(
@@ -133,6 +236,7 @@ fun CatalogScreen(
                     items(filteredDrivers, key = { it.id }) { driver ->
                         DriverCatalogCard(
                             driver = driver,
+                            detectedGpu = detectedGpu,
                             downloadProgress = downloadingMap[driver.id],
                             onDownload = { onDownloadDriver(driver) }
                         )
@@ -146,6 +250,7 @@ fun CatalogScreen(
 @Composable
 fun DriverCatalogCard(
     driver: DriverMetadata,
+    detectedGpu: AdrenoGpu,
     downloadProgress: Int?,
     onDownload: () -> Unit,
     modifier: Modifier = Modifier
@@ -207,6 +312,9 @@ fun DriverCatalogCard(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            GpuSupportBadges(driver = driver, detectedGpu = detectedGpu)
 
             if (driver.description.isNotBlank()) {
                 Spacer(modifier = Modifier.height(8.dp))

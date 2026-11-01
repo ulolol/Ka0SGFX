@@ -294,7 +294,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             // Do NOT use -t with -s: on Android, -t takes the last N lines of the ENTIRE system buffer BEFORE filtering!
             val cmd = listOf(
                 "logcat", "-d",
-                "-s", "KaosGFX-Bootstrap", "KaosGFX-Bridge", "KaosGFX-PLTHook", "Turnip", "freedreno", "vulkan", "Adreno"
+                "-s", "KaosGFX-Bootstrap", "KaosGFX-Bridge", "KaosGFX-PLTHook", "Turnip", "freedreno", "vulkan", "Adreno", "MESA", "TU", "GraphicsEnvironment"
             )
             val res = executeCommand(cmd)
             val allLines = res.stdout.lines().filter { it.isNotBlank() }
@@ -322,6 +322,30 @@ class PrivilegedService : IPrivilegedService.Stub() {
             pidStr?.toIntOrNull() ?: -1
         } catch (e: Exception) {
             -1
+        }
+    }
+
+    override fun hasShellRootAccess(): Boolean {
+        if (Process.myUid() == 0) return true
+        return try {
+            val res = executeCommand(listOf("su", "-c", "id"))
+            res.exitCode == 0 && res.stdout.contains("uid=0")
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    override fun execRootScript(script: String): String {
+        return try {
+            val cmd = if (Process.myUid() == 0) {
+                listOf("/system/bin/sh", "-c", script)
+            } else {
+                listOf("su", "-c", script)
+            }
+            val res = executeCommand(cmd)
+            "${res.exitCode}\n${res.stdout}\n${res.stderr}".trimEnd()
+        } catch (e: Exception) {
+            "-1\n${e.message ?: "Exception"}"
         }
     }
 

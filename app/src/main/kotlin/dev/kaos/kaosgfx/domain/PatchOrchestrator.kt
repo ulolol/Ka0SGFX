@@ -1,10 +1,10 @@
 package dev.kaos.kaosgfx.domain
 
 import android.content.Context
-import android.util.Log
 import android.os.Environment
-import dev.kaos.kaosgfx.drivers.DriverMetadata
+import android.util.Log
 import dev.kaos.kaosgfx.drivers.DriverManager
+import dev.kaos.kaosgfx.drivers.DriverMetadata
 import dev.kaos.kaosgfx.patcher.ApkPatcherEngine
 import dev.kaos.kaosgfx.privileged.AngleDriverType
 import dev.kaos.kaosgfx.privileged.PrivilegedClient
@@ -46,6 +46,10 @@ class PatchOrchestrator(
         enableAngle: Boolean,
         onProgress: (step: String, progress: Float) -> Unit
     ): Result<Unit> = withContext(Dispatchers.IO) {
+        if (privilegedClient.isRootModeActive() && !game.isPatched) {
+            return@withContext applyDriverRootMode(game, driver, enableAngle, onProgress)
+        }
+
         if (game.isDenylisted) {
             return@withContext Result.failure(
                 SecurityException("Cannot patch ${game.appName}: ${game.denylistReason}")
@@ -131,30 +135,13 @@ class PatchOrchestrator(
                 )
             }
 
-            // Step 3: Ensure driver is downloaded and stage driver bundle
-            var driverToStage = driver
-            if (driverToStage.localPath == null || !File(driverToStage.localPath!!).exists()) {
-                onProgress("Downloading ${driver.name} driver package...", 0.6f)
-                driverDownloader.downloadDriver(driverToStage).collect { progress ->
-                    when (progress) {
-                        is dev.kaos.kaosgfx.drivers.DownloadProgress.Progress -> {
-                            val p = 0.6f + 0.15f * (progress.percentage / 100f)
-                            onProgress("Downloading ${driver.name} (${progress.percentage}%)...", p)
-                        }
-                        is dev.kaos.kaosgfx.drivers.DownloadProgress.Completed -> {
-                            driverToStage = progress.metadata
-                        }
-                        is dev.kaos.kaosgfx.drivers.DownloadProgress.Failed -> {
-                            Log.w(TAG, "Driver download failed: ${progress.error.message}")
-                        }
-                    }
-                }
-            }
+            // Step 4: Ensure driver is downloaded and stage driver bundle
+            val driverToStage = ensureDriverDownloaded(driver, onProgress, baseProgress = 0.6f, span = 0.15f)
+                .getOrElse { return@withContext Result.failure(it) }
 
             onProgress("Staging ${driverToStage.name} bundle into external storage...", 0.78f)
-            val configJson = driverManager.buildConfigJson(game.packageName, driverToStage, enableAngle)
-            val driverZip = driverToStage.localPath?.let { File(it) }?.takeIf { it.exists() }
-                ?: File(dev.kaos.kaosgfx.drivers.DriverStorage.getDriversDir(context), driverToStage.fileName).takeIf { it.exists() }
+            val configJson = driverManager.buildConfigJson(game.packageName, driverToStage, enableAngle, mode = "patch")
+            val driverZip = resolveLocalDriverZip(driverToStage)
             val stageResult = privilegedClient.stageDriver(game.packageName, driverZip, configJson)
             if (stageResult.isFailure) {
                 Log.w(TAG, "Driver staging warning: ${stageResult.exceptionOrNull()?.message}")
@@ -168,12 +155,12 @@ class PatchOrchestrator(
                 Log.w(TAG, "Failed writing local config copy: ${e.message}")
             }
 
-            // Step 4: Configure ANGLE GLES driver selection
+            // Step 5: Configure ANGLE GLES driver selection
             onProgress("Configuring graphics driver routing...", 0.9f)
             val angleType = if (enableAngle) AngleDriverType.ANGLE else AngleDriverType.DEFAULT
             privilegedClient.setAngleDriver(game.packageName, angleType)
 
-            // Step 5: Force stop to apply changes
+            // Step 6: Force stop to apply changes
             onProgress("Finalizing setup and stopping stale process...", 1.0f)
             privilegedClient.forceStop(game.packageName)
 
@@ -184,10 +171,67 @@ class PatchOrchestrator(
         }
     }
 
+    /**
+     * Zero-Patch Root Mode: Applies custom Vulkan driver per-app via Android's native
+     * GraphicsEnvironment updatable driver namespace and carrier package WITHOUT modifying
+     * or reinstalling the target APK.
+     */
+    suspend fun applyDriverRootMode(
+        game: GameApp,
+        driver: DriverMetadata,
+        enableAngle: Boolean,
+        onProgress: (step: String, progress: Float) -> Unit
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            onProgress("Preparing ${driver.name} for Root zero-patch injection...", 0.15f)
+            val readyDriver = ensureDriverDownloaded(driver, onProgress, baseProgress = 0.2f, span = 0.35f)
+                .getOrElse { return@withContext Result.failure(it) }
+
+            val driverZip = resolveLocalDriverZip(readyDriver)
+                ?: return@withContext Result.failure(IllegalStateException("Driver archive not found on disk: ${readyDriver.fileName}"))
+
+            onProgress("Resolving system GraphicsEnvironment carrier...", 0.6f)
+            val carrier = privilegedClient.rootDriverManager.resolveCarrierPackage()
+                .getOrElse { return@withContext Result.failure(it) }
+
+            val configJson = driverManager.buildConfigJson(
+                targetPackage = game.packageName,
+                driver = readyDriver,
+                enableAngle = enableAngle,
+                mode = "root",
+                carrierPackage = carrier.packageName
+            )
+
+            onProgress("Staging Vulkan HAL into ${carrier.packageName} & opting in ${game.appName} (Zero APK Patch)...", 0.8f)
+            val applyRes = privilegedClient.rootDriverManager.applyRootDriver(
+                packageName = game.packageName,
+                driverZip = driverZip,
+                libraryNameHint = readyDriver.libraryName,
+                configJson = configJson,
+                enableAngle = enableAngle
+            )
+            if (applyRes.isFailure) {
+                return@withContext Result.failure(
+                    applyRes.exceptionOrNull() ?: RuntimeException("Root driver injection failed")
+                )
+            }
+
+            onProgress("Root driver active for ${game.appName} (original APK untouched)!", 1.0f)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to apply root driver for ${game.packageName}", e)
+            Result.failure(e)
+        }
+    }
+
     suspend fun unpatchGame(
         game: GameApp,
         onProgress: ((step: String, progress: Float) -> Unit)? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
+        if (game.isRootActive && !game.isPatched) {
+            return@withContext restoreStockRootMode(game, onProgress)
+        }
+
         try {
             val workDir = getWorkDir()
             val stockBackup = File(workDir, "${game.packageName}-stock.apk")
@@ -252,5 +296,60 @@ class PatchOrchestrator(
             Log.e(TAG, "Failed to unpatch ${game.packageName}", e)
             Result.failure(e)
         }
+    }
+
+    suspend fun restoreStockRootMode(
+        game: GameApp,
+        onProgress: ((step: String, progress: Float) -> Unit)? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        onProgress?.invoke("Removing Root driver opt-in and restoring stock Vulkan HAL...", 0.5f)
+        val res = privilegedClient.rootDriverManager.removeRootDriver(game.packageName)
+        if (res.isSuccess) {
+            onProgress?.invoke("Stock driver restored for ${game.appName}!", 1.0f)
+        }
+        res
+    }
+
+    private suspend fun ensureDriverDownloaded(
+        driver: DriverMetadata,
+        onProgress: (step: String, progress: Float) -> Unit,
+        baseProgress: Float,
+        span: Float
+    ): Result<DriverMetadata> {
+        var driverToStage = driver
+        val existing = resolveLocalDriverZip(driverToStage)
+        if (existing != null && existing.exists()) {
+            driverToStage.isInstalled = true
+            driverToStage.localPath = existing.absolutePath
+            return Result.success(driverToStage)
+        }
+
+        if (driverToStage.downloadUrl.isBlank()) {
+            return Result.failure(IllegalStateException("Driver ${driverToStage.name} is not downloaded and has no download URL"))
+        }
+
+        var downloadError: Throwable? = null
+        onProgress("Downloading ${driver.name} driver package...", baseProgress)
+        driverDownloader.downloadDriver(driverToStage).collect { progress ->
+            when (progress) {
+                is dev.kaos.kaosgfx.drivers.DownloadProgress.Progress -> {
+                    val p = baseProgress + span * (progress.percentage / 100f)
+                    onProgress("Downloading ${driver.name} (${progress.percentage}%)...", p)
+                }
+                is dev.kaos.kaosgfx.drivers.DownloadProgress.Completed -> {
+                    driverToStage = progress.metadata
+                }
+                is dev.kaos.kaosgfx.drivers.DownloadProgress.Failed -> {
+                    downloadError = progress.error
+                }
+            }
+        }
+        downloadError?.let { return Result.failure(it) }
+        return Result.success(driverToStage)
+    }
+
+    private fun resolveLocalDriverZip(driver: DriverMetadata): File? {
+        return driver.localPath?.let { File(it) }?.takeIf { it.exists() }
+            ?: File(dev.kaos.kaosgfx.drivers.DriverStorage.getDriversDir(context), driver.fileName).takeIf { it.exists() }
     }
 }

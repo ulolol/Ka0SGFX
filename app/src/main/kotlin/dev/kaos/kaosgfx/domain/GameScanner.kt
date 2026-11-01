@@ -5,6 +5,7 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.os.Build
+import android.provider.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -17,10 +18,14 @@ data class GameApp(
     val baseApkPath: String,
     val splitApkPaths: List<String>,
     val isPatched: Boolean,
+    val isRootActive: Boolean = false,
     val isDenylisted: Boolean,
     val denylistReason: String? = null,
     val isGameCategory: Boolean = true
-)
+) {
+    val hasCustomDriver: Boolean
+        get() = isPatched || isRootActive
+}
 
 class GameScanner(private val context: Context) {
 
@@ -44,6 +49,35 @@ class GameScanner(private val context: Context) {
         )
     }
 
+    private fun readRootOptedInApps(): Set<String> {
+        val result = mutableSetOf<String>()
+        try {
+            val optIn = Settings.Global.getString(
+                context.contentResolver,
+                "updatable_driver_production_opt_in_apps"
+            )
+            if (!optIn.isNullOrBlank() && optIn != "null") {
+                optIn.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { result.add(it) }
+            }
+        } catch (_: Exception) {
+        }
+
+        // Also check /sdcard/Download/KaosGFX/configs/*.json for mode=="root"
+        try {
+            val configsDir = File("/sdcard/Download/KaosGFX/configs")
+            val files = configsDir.listFiles { _, name -> name.endsWith(".json") } ?: emptyArray()
+            for (f in files) {
+                val pkg = f.nameWithoutExtension
+                val text = f.readText()
+                if (text.contains("\"mode\"") && text.contains("\"root\"")) {
+                    result.add(pkg)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return result
+    }
+
     suspend fun scanGames(includeAllApps: Boolean = false): List<GameApp> = withContext(Dispatchers.IO) {
         val pm = context.packageManager
         val packages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -52,6 +86,7 @@ class GameScanner(private val context: Context) {
             pm.getInstalledPackages(0)
         }
 
+        val rootActivePkgs = readRootOptedInApps()
         val games = mutableListOf<GameApp>()
 
         for (pkg in packages) {
@@ -65,6 +100,7 @@ class GameScanner(private val context: Context) {
             if (baseApkPath.isEmpty() || !File(baseApkPath).exists()) continue
 
             val isPatched = appInfo.appComponentFactory == BOOTSTRAP_FACTORY
+            val isRootActive = pkgName in rootActivePkgs
             val isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
             val isUpdatedSystemApp = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
             val isUserApp = !isSystemApp || isUpdatedSystemApp
@@ -74,12 +110,12 @@ class GameScanner(private val context: Context) {
             val isGame = (appInfo.category == ApplicationInfo.CATEGORY_GAME) ||
                     (appInfo.flags and ApplicationInfo.FLAG_IS_GAME) != 0
 
-            // Show all apps that can be patched:
-            // - All patched apps (always shown at top)
+            // Show all apps that can be configured:
+            // - All patched or root-active apps (always shown at top)
             // - All user-installed apps and games
             // - All launchable apps with an interface
             // - Pure background system services only shown if includeAllApps is true
-            if (!isPatched && !isUserApp && !isLaunchable && !includeAllApps) {
+            if (!isPatched && !isRootActive && !isUserApp && !isLaunchable && !includeAllApps) {
                 continue
             }
 
@@ -108,6 +144,7 @@ class GameScanner(private val context: Context) {
                     baseApkPath = baseApkPath,
                     splitApkPaths = splitPaths,
                     isPatched = isPatched,
+                    isRootActive = isRootActive,
                     isDenylisted = isDenylisted,
                     denylistReason = denylistReason,
                     isGameCategory = isGame
@@ -116,7 +153,7 @@ class GameScanner(private val context: Context) {
         }
 
         games.sortedWith(
-            compareByDescending<GameApp> { it.isPatched }
+            compareByDescending<GameApp> { it.hasCustomDriver }
                 .thenBy { it.isDenylisted }
                 .thenBy { it.appName.lowercase() }
         )

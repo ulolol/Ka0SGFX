@@ -52,6 +52,16 @@ interface IPrivilegedService {
     int getPackageProcessId(String packageName);
 
     /**
+     * Checks if the shell UID (2000) has su root access granted.
+     */
+    boolean hasShellRootAccess();
+
+    /**
+     * Executes a shell script via su -c from UID 2000 and returns combined output prefixed with exitCode.
+     */
+    String execRootScript(String script);
+
+    /**
      * Destroys the privileged service process.
      */
     void destroy();

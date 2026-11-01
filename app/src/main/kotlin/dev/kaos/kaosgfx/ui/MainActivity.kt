@@ -4,7 +4,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -31,7 +30,8 @@ import dev.kaos.kaosgfx.domain.PatchOrchestrator
 import dev.kaos.kaosgfx.drivers.DownloadProgress
 import dev.kaos.kaosgfx.drivers.DriverCatalogRepository
 import dev.kaos.kaosgfx.drivers.DriverMetadata
-import dev.kaos.kaosgfx.privileged.ShizukuState
+import dev.kaos.kaosgfx.drivers.GpuDetector
+import dev.kaos.kaosgfx.privileged.OperatingMode
 import dev.kaos.kaosgfx.ui.components.ProgressModal
 import dev.kaos.kaosgfx.ui.screens.CatalogScreen
 import dev.kaos.kaosgfx.ui.screens.DiagnosticsScreen
@@ -42,7 +42,9 @@ import dev.kaos.kaosgfx.ui.theme.KaosGFXTheme
 import dev.kaos.kaosgfx.ui.theme.PrimaryNeon
 import dev.kaos.kaosgfx.ui.theme.SurfaceDark
 import dev.kaos.kaosgfx.ui.theme.TextSecondary
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class Screen(val title: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
     GAMES("Games", Icons.Default.SportsEsports),
@@ -76,7 +78,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        app.privilegedClient.checkStatus()
+        lifecycleScope.launch {
+            app.privilegedClient.refreshCapabilities()
+        }
     }
 
     @Composable
@@ -84,6 +88,11 @@ class MainActivity : ComponentActivity() {
         var currentScreen by rememberSaveable { mutableStateOf(Screen.GAMES) }
 
         val shizukuState by app.privilegedClient.shizukuState.collectAsState()
+        val rootStatus by app.privilegedClient.rootStatus.collectAsState()
+        val operatingMode by app.privilegedClient.operatingMode.collectAsState()
+        val modePreference by app.privilegedClient.modePreference.collectAsState()
+
+        var detectedGpu by remember { mutableStateOf(GpuDetector.detect()) }
 
         var games by remember { mutableStateOf<List<GameApp>>(emptyList()) }
         var isGamesLoading by remember { mutableStateOf(false) }
@@ -138,7 +147,10 @@ class MainActivity : ComponentActivity() {
         }
 
         LaunchedEffect(Unit) {
-            app.privilegedClient.checkStatus()
+            withContext(Dispatchers.IO) {
+                detectedGpu = GpuDetector.detect()
+            }
+            app.privilegedClient.refreshCapabilities()
             loadGames()
             loadCatalog()
         }
@@ -177,16 +189,29 @@ class MainActivity : ComponentActivity() {
                     Screen.GAMES -> GamesScreen(
                         games = games,
                         isLoading = isGamesLoading,
+                        detectedGpu = detectedGpu,
+                        operatingMode = operatingMode,
+                        rootStatus = rootStatus,
                         shizukuState = shizukuState,
+                        modePreference = modePreference,
+                        onChangeModePreference = { pref ->
+                            app.privilegedClient.setModePreference(pref)
+                        },
                         includeSystemApps = includeSystemApps,
                         onToggleSystemApps = {
                             includeSystemApps = it
                             loadGames(it)
                         },
-                        onRefresh = { loadGames(includeSystemApps) },
+                        onRefresh = {
+                            lifecycleScope.launch {
+                                app.privilegedClient.refreshCapabilities()
+                                loadGames(includeSystemApps)
+                            }
+                        },
                         onRequestShizuku = {
                             lifecycleScope.launch {
                                 app.privilegedClient.requestPermission()
+                                app.privilegedClient.refreshCapabilities()
                             }
                         },
                         onRequestStorage = { requestStoragePermission() },
@@ -196,6 +221,7 @@ class MainActivity : ComponentActivity() {
                     Screen.CATALOG -> CatalogScreen(
                         drivers = catalogDrivers,
                         sources = DriverCatalogRepository.DEFAULT_SOURCES,
+                        detectedGpu = detectedGpu,
                         isLoading = isCatalogLoading,
                         downloadingMap = downloadingMap,
                         onRefresh = { loadCatalog() },
@@ -233,7 +259,15 @@ class MainActivity : ComponentActivity() {
                     )
 
                     Screen.DIAGNOSTICS -> DiagnosticsScreen(
-                        shizukuState = shizukuState
+                        detectedGpu = detectedGpu,
+                        operatingMode = operatingMode,
+                        rootStatus = rootStatus,
+                        shizukuState = shizukuState,
+                        modePreference = modePreference,
+                        onChangeModePreference = { pref ->
+                            app.privilegedClient.setModePreference(pref)
+                        },
+                        privilegedClient = app.privilegedClient
                     )
                 }
 
@@ -242,12 +276,18 @@ class MainActivity : ComponentActivity() {
                     GameDetailSheet(
                         game = game,
                         availableDrivers = catalogDrivers,
+                        detectedGpu = detectedGpu,
+                        isRootMode = operatingMode == OperatingMode.ROOT,
                         privilegedClient = app.privilegedClient,
                         onDismiss = { selectedGamePackage = null },
                         onPatchGame = { targetGame, driver, enableAngle ->
                             selectedGamePackage = null
                             lifecycleScope.launch {
-                                patchProgressStep = "Starting patch workflow..."
+                                patchProgressStep = if (operatingMode == OperatingMode.ROOT) {
+                                    "Starting Root zero-patch driver workflow..."
+                                } else {
+                                    "Starting APK patch workflow..."
+                                }
                                 patchProgressPercent = 0.05f
 
                                 val res = orchestrator.patchAndInstallGame(
@@ -261,11 +301,17 @@ class MainActivity : ComponentActivity() {
 
                                 patchProgressStep = null
                                 if (res.isSuccess) {
-                                    Toast.makeText(this@MainActivity, "Successfully injected ${driver.name} into ${targetGame.appName}!", Toast.LENGTH_LONG).show()
+                                    val msg = if (operatingMode == OperatingMode.ROOT) {
+                                        "Root driver ${driver.name} enabled for ${targetGame.appName} (Zero APK Patch)!"
+                                    } else {
+                                        "Successfully injected ${driver.name} into ${targetGame.appName}!"
+                                    }
+                                    Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+                                    app.privilegedClient.refreshCapabilities()
                                     loadGames()
                                     loadCatalog()
                                 } else {
-                                    Toast.makeText(this@MainActivity, "Patch failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(this@MainActivity, "Failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                                 }
                             }
                         },
@@ -281,6 +327,7 @@ class MainActivity : ComponentActivity() {
                                 patchProgressStep = null
                                 if (res.isSuccess) {
                                     Toast.makeText(this@MainActivity, "Restored stock configuration for ${targetGame.appName}", Toast.LENGTH_SHORT).show()
+                                    app.privilegedClient.refreshCapabilities()
                                     loadGames()
                                     loadCatalog()
                                 } else {

@@ -15,6 +15,8 @@ data class DriverMetadata(
     val libraryName: String = "libvulkan_freedreno.so",
     val sourceRepo: String = "",
     val releaseDate: String = "",
+    val gpuSupport: GpuSupport = GpuSupport(),
+    val driverType: DriverType = DriverType.TURNIP,
     var isInstalled: Boolean = false,
     var localPath: String? = null
 )
@@ -36,7 +38,9 @@ data class DriverConfig(
     val hookLibDir: String = "",
     val enableAngle: Boolean = false,
     val driverId: String = "",
-    val driverTitle: String = ""
+    val driverTitle: String = "",
+    val mode: String = "patch",
+    val carrierPackage: String = ""
 )
 
 sealed class DownloadProgress {
