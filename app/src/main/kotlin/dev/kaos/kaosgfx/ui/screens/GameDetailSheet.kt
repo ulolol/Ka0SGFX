@@ -359,7 +359,7 @@ fun GameDetailSheet(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Enable ANGLE for OpenGL ES", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = TextPrimary)
-                            Text("Translates OpenGL ES calls to Vulkan through ANGLE runtime.", fontSize = 12.sp, color = TextSecondary)
+                            Text("Translates OpenGL ES calls to Vulkan through ANGLE runtime (Native Adreno GLES used by default).", fontSize = 12.sp, color = TextSecondary)
                         }
                         Switch(
                             checked = enableAngle,

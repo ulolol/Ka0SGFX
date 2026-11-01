@@ -263,3 +263,20 @@ KaosGFX (`dev.kaos.kaosgfx`) is an open-source, non-root graphics driver manager
    - Added `PrivilegeModeBanner` and `GpuSupportBadges`.
    - Filtered `CatalogScreen` and `GameDetailSheet` by detected GPU generation by default (`164 compatible/unverified • 375 incompatible hidden` on Adreno 825) with a `"Show All (+375)"` toggle chip.
    - Updated `DiagnosticsScreen` with live hardware metrics and Root/Shizuku mode switching.
+
+## 2026-11-01 — Post-v2.0.0 Hotfix: Native Default GL Driver in Root Mode & Adaptive Icon Rendering
+
+### Root Cause 1: Hybrid GL/Vulkan Apps Crashing in `libEGL.so` / `libGLESv2_adreno.so` when ANGLE is OFF
+- **Question**: Do the downloaded AdrenoTools / Turnip `.zip` packages contain both OpenGL ES and Vulkan drivers?
+  - **Answer**: **No.** All AdrenoTools / Turnip `.zip` packages (`libvulkan_freedreno.so`, `vulkan.adreno.so`, `vulkan.purple.so`) ship **only a Vulkan ICD (`.so`) and `meta.json`** — they do not include OpenGL ES libraries (`libEGL_adreno.so` / `libGLESv2_adreno.so`).
+- **Why 3DMark and Vulkan Caps Viewer crashed when ANGLE was OFF**:
+  - When an app is added to `updatable_driver_production_opt_in_apps`, Android's `GraphicsEnvironment` switches **both** `libvulkan.so` AND `libEGL.so` (`android::Loader::open`) to load from the `updatable gfx driver` linker namespace (`<carrier>/lib/arm64`).
+  - When ANGLE is OFF (using the default native GL driver), `libEGL.so` unloads the system `/vendor/lib64/egl` GL driver (`Unload system gl driver. Load updated gl driver.`) and searches `<carrier>/lib/arm64` for `libEGL_adreno.so`, `libGLESv2_adreno.so`, `libGLESv1_CM_adreno.so`, `eglSubDriverAndroid.so`, the Adreno GL shader compiler (`libllvm-qgl.so`, `libllvm-glnext.so`, `libllvm-qcom.so`, `libadreno_app_profiles.so`), and their transitive `/vendor/lib64` `DT_NEEDED` libraries.
+- **Fix (`RootDriverManager.kt`)**:
+  - Updated `applyRootDriver()` to stage `/vendor/lib64/egl/*.so`, `/vendor/lib64/{libllvm-qgl.so,libllvm-glnext.so,libllvm-qcom.so,libadreno_app_profiles.so}`, and their transitive `/vendor/lib64/` `DT_NEEDED` libraries into `<carrier>/lib/arm64/` alongside the custom `vulkan.adreno.so`.
+  - Verified on physical device `73ccb990` with **both** `de.saschawillems.vulkancapsviewer` and `com.futuremark.dmandroid.application` (3DMark) with **ANGLE OFF**: both apps load the **native default Qualcomm Adreno OpenGL ES driver (`0800.48`)** alongside the **custom Turnip Vulkan driver** without crashing.
+
+### Root Cause 2: App Icons Missing for Most Installed Apps
+- **Why**: `GamesScreen.kt` and `GameDetailSheet.kt` used `(game.icon as? BitmapDrawable)?.bitmap`, which returns `null` on Android 8.0+ for all apps using `AdaptiveIconDrawable`, `VectorDrawable`, or `LayerDrawable`.
+- **Fix (`GameScanner.kt`)**:
+  - Added `drawableToBitmapDrawable()` in `GameScanner.scanGames()` (on `Dispatchers.IO`) to rasterize any `Drawable` (`AdaptiveIconDrawable`, `VectorDrawable`, `LayerDrawable`, `BitmapDrawable`) onto an `ARGB_8888` `BitmapDrawable` so all app icons render properly across `GamesScreen` and `GameDetailSheet`.

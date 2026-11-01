@@ -3,6 +3,9 @@ package dev.kaos.kaosgfx.domain
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.provider.Settings
@@ -126,7 +129,7 @@ class GameScanner(private val context: Context) {
             }
 
             val icon = try {
-                appInfo.loadIcon(pm)
+                drawableToBitmapDrawable(appInfo.loadIcon(pm))
             } catch (e: Exception) {
                 null
             }
@@ -157,5 +160,26 @@ class GameScanner(private val context: Context) {
                 .thenBy { it.isDenylisted }
                 .thenBy { it.appName.lowercase() }
         )
+    }
+
+    /**
+     * Converts any Drawable (including Android 8+ AdaptiveIconDrawable, VectorDrawable, LayerDrawable)
+     * into a BitmapDrawable on Dispatchers.IO so Compose Image cards render all app icons reliably.
+     */
+    private fun drawableToBitmapDrawable(drawable: Drawable): BitmapDrawable? {
+        if (drawable is BitmapDrawable && drawable.bitmap != null) {
+            return drawable
+        }
+        return try {
+            val width = if (drawable.intrinsicWidth > 0) drawable.intrinsicWidth.coerceAtMost(192) else 144
+            val height = if (drawable.intrinsicHeight > 0) drawable.intrinsicHeight.coerceAtMost(192) else 144
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bitmap)
+            drawable.setBounds(0, 0, canvas.width, canvas.height)
+            drawable.draw(canvas)
+            BitmapDrawable(context.resources, bitmap)
+        } catch (_: Exception) {
+            null
+        }
     }
 }

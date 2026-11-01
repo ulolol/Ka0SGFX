@@ -254,9 +254,14 @@ class RootDriverManager(
             return@withContext Result.failure(RuntimeException("Failed to extract Vulkan .so from ${driverZip.name}: ${e.message}", e))
         }
 
-        // 2. Stage extracted .so to world-accessible path or copy directly via su from our app cache path
+        // 2. Stage extracted .so to world-accessible path or copy directly via su from our app cache path.
+        // Note: In Android's GraphicsEnvironment updatable-driver path, BOTH libvulkan.so and libEGL.so
+        // switch to the carrier's linker namespace. Since custom Turnip/AdrenoTools zips only ship a
+        // Vulkan ICD (vulkan.*.so) and no standalone GLES driver, ANGLE must be enabled for opted-in
+        // packages so libEGL.so routes OpenGL ES calls onto the custom Vulkan driver instead of aborting.
         val srcPath = extractedSo.absolutePath
-        val angleAction = if (enableAngle) "angle" else "default"
+        updateAngleSettingRoot(packageName, AngleDriverType.ANGLE)
+        writeRootDriverConfigs(packageName, configJson)
 
         val script = """
             set -e
@@ -291,6 +296,7 @@ class RootDriverManager(
             fi
 
             mkdir -p "${carrier.libArm64Dir}"
+            rm -f "${carrier.libArm64Dir}/"*.so 2>/dev/null || true
             VK_HW=$(getprop ro.hardware.vulkan)
             [ -z "${'$'}VK_HW" ] && VK_HW="adreno"
             BOARD_PLT=$(getprop ro.board.platform)
@@ -357,10 +363,6 @@ class RootDriverManager(
                 RuntimeException("Root driver injection failed (exit ${res.exitCode}): ${res.combined}")
             )
         }
-
-        // Write config metadata and ANGLE setting
-        writeRootDriverConfigs(packageName, configJson)
-        updateAngleSettingRoot(packageName, if (angleAction == "angle") AngleDriverType.ANGLE else AngleDriverType.DEFAULT)
 
         Result.success(carrier)
     }
